@@ -40,9 +40,12 @@ context, update the expected album and phase, and persist a fresh session timest
 startup calls or recommendations cannot satisfy the resume checks.
 The isolated invocation preapproves only synthetic state queries and session
 updates so the noninteractive `never` approval policy can run the workflow.
-It performs dependency inspection and `configure show`; it does not install
-packages or exercise every interactive configuration response. These checks
-cover the startup/resume slice, not the full downstream music-production pipeline.
+The startup prompt requests dependency inspection and `configure show`, without
+package installation. Its automated assertions require Codex health diagnostics
+and successful MCP calls; they do not independently prove that setup, configure,
+and every startup step ran. The dated configuration/override acceptance below
+records those separate observations. These checks cover the startup/resume slice,
+not the full downstream music-production pipeline.
 
 ### Upstream integration verification — 2026-10-22
 

@@ -204,6 +204,23 @@ def read_saved_session(home: Path) -> dict[str, Any]:
     return session
 
 
+def stop_model_process(process: subprocess.Popen[str]) -> None:
+    """Stop the launcher and its model/MCP descendants before fixture cleanup."""
+    if sys.platform == "win32":
+        if process.poll() is None:
+            with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+                subprocess.run(
+                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                    capture_output=True, check=False, timeout=10,
+                )
+    else:
+        with contextlib.suppress(OSError):
+            os.killpg(process.pid, signal.SIGKILL)
+    if process.poll() is None:
+        process.kill()
+    process.wait(timeout=10)
+
+
 def check_model(codex: str, workspace: Path, env: dict[str, str], auth_home: Path) -> None:
     """Exercise real skill loading and inspect structured tool events."""
     auth = auth_home / "auth.json"
@@ -249,13 +266,7 @@ def check_model(codex: str, workspace: Path, env: dict[str, str], auth_home: Pat
             try:
                 stdout, stderr = process.communicate(timeout=600)
             finally:
-                # Reap MCP descendants as well, including after a timeout.
-                if sys.platform != "win32":
-                    with contextlib.suppress(OSError):
-                        os.killpg(process.pid, signal.SIGKILL)
-                elif process.poll() is None:
-                    process.kill()
-                process.wait()
+                stop_model_process(process)
         require(process.returncode == 0, f"Model probe failed (exit {process.returncode}): {stderr[-2000:]}")
         events = [json.loads(line) for line in stdout.splitlines() if line.strip()]
         call_count += check_model_turn(events, resume=resume)

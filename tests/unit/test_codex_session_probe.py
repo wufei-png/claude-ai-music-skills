@@ -1,8 +1,14 @@
 """Regression checks for model evidence attribution and session persistence."""
 
+import contextlib
 import importlib
 import json
+import os
+import signal
+import subprocess
+import sys
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -76,7 +82,7 @@ def run_model_stub(probe, monkeypatch, home, mode):
                 state_file.write_text(json.dumps({"session": saved}), encoding="utf-8")
             return "\n".join(json.dumps(e) for e in self.events), ""
 
-        def wait(self):
+        def wait(self, timeout=None):
             return 0
 
         def poll(self):
@@ -161,3 +167,72 @@ def test_venv_link_cleanup_preserves_source(probe, tmp_path, directory_name):
         probe.link_venv(source, target)
         assert (target / marker.name).samefile(marker)
     assert marker.read_text(encoding="utf-8") == "keep the source dependencies"
+
+
+def test_model_timeout_cleanup_closes_descendant_pipes(probe, tmp_path):
+    """A surviving child keeps stdout open even after its launcher is killed."""
+    pid_file = tmp_path / "child.pid"
+    launcher = (
+        "import pathlib, subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+        "pathlib.Path(sys.argv[1]).write_text(str(child.pid), encoding='utf-8')\n"
+        "time.sleep(30)\n"
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", launcher, str(pid_file)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
+        start_new_session=sys.platform != "win32",
+    )
+    drained = False
+    try:
+        deadline = time.monotonic() + 10
+        while not pid_file.is_file() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert pid_file.is_file(), "Synthetic launcher did not start its child"
+        with pytest.raises(subprocess.TimeoutExpired):
+            process.communicate(timeout=0.1)
+        probe.stop_model_process(process)
+        # EOF proves descendants released inherited handles, not just the parent.
+        process.communicate(timeout=5)
+        drained = True
+    finally:
+        if not drained:
+            # Independent cleanup keeps a failing regression test from leaking.
+            if sys.platform == "win32":
+                pids = [process.pid]
+                if pid_file.is_file():
+                    pids.append(int(pid_file.read_text(encoding="utf-8")))
+                for pid in pids:
+                    subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                                   capture_output=True, check=False, timeout=10)
+            else:
+                with contextlib.suppress(OSError):
+                    os.killpg(process.pid, signal.SIGKILL)
+            process.communicate(timeout=5)
+
+
+@pytest.mark.parametrize("error", [OSError("taskkill unavailable"), subprocess.TimeoutExpired("taskkill", 10)])
+def test_windows_model_cleanup_falls_back_when_taskkill_fails(probe, monkeypatch, error):
+    class Launcher:
+        pid = 424242
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+
+        def wait(self, timeout):
+            assert timeout == 10
+            assert self.returncode == -9
+
+    def failed_taskkill(command, **kwargs):
+        assert command == ["taskkill", "/PID", "424242", "/T", "/F"]
+        assert kwargs["timeout"] == 10
+        raise error
+
+    with monkeypatch.context() as windows:
+        windows.setattr(probe.sys, "platform", "win32")
+        windows.setattr(probe.subprocess, "run", failed_taskkill)
+        probe.stop_model_process(Launcher())
