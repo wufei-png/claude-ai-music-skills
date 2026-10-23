@@ -150,8 +150,9 @@ def test_session_probe_reports_mcp_startup_error(probe, host_app, tmp_path):
         probe.SessionProbe(host_app, tmp_path / "foreign workspace", codex_home=tmp_path / "codex home")
 
 
-def test_venv_link_cleanup_preserves_source(probe, tmp_path):
-    source = tmp_path / "dependency venv"
+@pytest.mark.parametrize("directory_name", ["dependency venv", "Alice&Bob", "Alice%TEMP%Bob", "Alice^Bob"])
+def test_venv_link_cleanup_preserves_source(probe, tmp_path, directory_name):
+    source = tmp_path / directory_name
     source.mkdir()
     marker = source / "dependency.txt"
     marker.write_text("keep the source dependencies", encoding="utf-8")

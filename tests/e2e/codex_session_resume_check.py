@@ -33,6 +33,9 @@ from codex_plugin_discovery_check import (
     _is_under,
 )
 
+if sys.platform == "win32":
+    import _winapi
+
 ALBUM = "probe-album"
 ARTIST = "probeArtist"
 MODEL_TOOLS = (
@@ -271,12 +274,8 @@ def link_venv(source: Path, target: Path) -> None:
     """Reuse dependencies without requiring Windows symlink privileges."""
     source = source.resolve()
     if sys.platform == "win32":
-        result = subprocess.run(
-            ["cmd", "/d", "/c", "mklink", "/J", str(target), str(source)],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
-        )
-        require(result.returncode == 0,
-                f"Could not create venv junction: {result.stderr or result.stdout}")
+        # Keep '&', '%' and '^' literal instead of passing paths through cmd.
+        _winapi.CreateJunction(str(source), str(target))
     else:
         target.symlink_to(source, target_is_directory=True)
 
