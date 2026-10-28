@@ -12,112 +12,68 @@ python3 tests/e2e/codex_plugin_discovery_check.py --codex tests/e2e/codex/node_m
 python3 tests/e2e/codex_session_resume_check.py --codex tests/e2e/codex/node_modules/.bin/codex --venv .venv
 ```
 
-The second probe uses temporary `HOME` and `CODEX_HOME` directories and an
-unrelated music-project cwd. It derives the skill set from the canonical tree
-and verifies it through Codex's host API. Both the skills and the MCP server
-must come from the plugin copy installed under the temporary `CODEX_HOME`. It
-then exercises configuration, Codex health diagnostics, source-verification
-state, album lookup/progress, and persisted session updates through MCP. It
-asserts that the synthetic album and track files remain unchanged. CI runs this
-without starting a model turn on Linux and Windows. The dependency venv is
-linked into the isolated home (a directory junction on Windows, which needs no
-symlink privileges). Fixture cleanup preserves the source venv. On Windows,
-use `python` and append `.cmd` to the Codex executable path above. Use
-`--venv /path/to/venv` or `--codex /path/to/codex` for another installation.
+The session probe creates temporary `HOME` and `CODEX_HOME` directories and a
+music-project directory outside the plugin. It links the dependency venv into
+that home; on Windows it uses a directory junction. On Windows, use `python`
+and append `.cmd` to the Codex executable path above. Supply `--venv` or
+`--codex` to choose another installation.
 
-To additionally exercise the installed setup, configure, startup, and resume
-skills with authenticated startup and resume model turns:
+**Expected:** Both probes exit 0. Codex discovers the canonical skill set and
+starts the MCP server from the isolated installed copy. Through MCP, the session
+probe checks configuration, Codex health, source-verification state, album
+progress, and persisted session updates; synthetic album and track files remain
+unchanged. CI runs these checks without model turns on Linux and Windows.
+
+To run the optional authenticated model probe:
 
 ```bash
 python3 tests/e2e/codex_session_resume_check.py --codex tests/e2e/codex/node_modules/.bin/codex --venv .venv --model-check
 ```
 
-This uses account usage. The optional check copies existing `auth.json` into
-the temporary Codex home with private permissions, leaves normal Codex settings
-unchanged, and checks actual MCP calls and the source-verification recommendation.
-Startup and resume must each supply their own evidence. Resume must query session
-context, update the expected album and phase, and persist a fresh session timestamp;
-startup calls or recommendations cannot satisfy the resume checks.
-The isolated invocation preapproves only synthetic state queries and session
-updates so the noninteractive `never` approval policy can run the workflow.
-The startup prompt requests dependency inspection and `configure show`, without
-package installation. Its automated assertions require Codex health diagnostics
-from the plugin with an `ok` or `warn` status. Plugin MCP calls must also return
-JSON results without business errors; a successful transport alone is not enough.
-These assertions do not independently prove that setup, configure, and every
-startup step ran. The dated configuration/override acceptance below
-records those separate observations. These checks cover the startup/resume slice,
-not the full downstream music-production pipeline.
+This consumes account usage. When available, the probe temporarily copies the
+existing `auth.json` into the isolated Codex home with private permissions.
+The startup prompt requests dependency inspection and `configure show` without
+installing packages. A passing run requires plugin MCP calls to return usable
+JSON without business errors and Codex health to report `ok` or `warn`. The
+resume turn must independently query session context, recommend source
+verification, and persist a fresh session update.
 
-### Isolated macOS model acceptance — 2026-10-23
+The automated model probe does not independently prove that every setup or
+configuration step ran. It covers this startup/resume workflow, not a fresh
+dependency installation or the downstream music-production pipeline.
 
-At commit `787b8e8`, an independent acceptance used Codex CLI 0.162.1 and
-`gpt-6-luna` with max reasoning against a synthetic workspace and installed
-plugin copy. Real model turns covered setup checks, interactive configuration,
-configured and missing overrides, startup, named and session-based resume,
-missing configuration, and an unknown album. A separate cold-start turn rebuilt
-the absent state cache. The source-verification gate and session persistence
-were checked against actual results; creative fixture files were unchanged.
+### Manual conversational acceptance
 
-Some tool calls initially failed and were retried, including relative document
-reads and YAML validation with a system interpreter lacking PyYAML. The cases
-above completed after recovery. This is historical macOS evidence, not a run
-of the optional automated model probe or proof of native Windows/Linux model
-behavior, a fresh dependency installation, or downstream production workflows.
+Use a separate temporary `HOME` and `CODEX_HOME` (`USERPROFILE` as well on
+Windows), an installed copy of the plugin, and a music workspace outside the
+plugin. Start a new Codex/MCP process in that environment; changing `HOME` in
+an existing session does not redirect its already-running MCP server. Use a
+synthetic album with at least one track awaiting source verification. If using
+a temporary authentication copy, restrict its permissions and remove it after
+testing.
 
-### Upstream integration verification — 2026-10-22
+1. With no config in the isolated home, invoke `setup` to inspect dependencies,
+   then invoke `configure setup` without supplying settings. Expect questions
+   for the required fields and no config file until answers are supplied.
+2. Provide an artist and content, audio, documents, and overrides paths. Use a
+   path containing spaces and an overrides directory outside the content root.
+   Expect the saved YAML to preserve the supplied values and artist casing.
+   Change only the audio path with `configure edit` and compare the other fields.
+3. Place a unique marker in the configured overrides `CLAUDE.md` and a different
+   marker in the music workspace's `CLAUDE.md`. Start a fresh `session-start`
+   session without revealing the markers. Expect the configured marker, a
+   `health_check(runtime="codex")` call, and no cwd marker. With the optional
+   overrides directory absent, startup should continue without it.
+4. Resume the synthetic album by name and then in a new session without a name.
+   Expect the source-verification recommendation and the correct album and
+   phase persisted in session state. Missing config should direct the user to
+   configure; an unknown album must not create or invent session progress.
+5. Compare album and track files before and after startup/resume; expect no
+   changes. Record the commit, host, CLI and model settings, tool results,
+   retries, and any cases not exercised.
 
-Verified locally on macOS arm64, Python 3.11.5, and the pinned Codex CLI 0.162.1,
-with plugin version 0.104.0-dev based on upstream `develop` at `c5a2db5`.
-These checks used isolated synthetic workspaces without model turns or an
-authentication copy:
-
-| Check | Result |
-|---|---|
-| Discovery | All 53 current canonical skills loaded; MCP answered from the installed copy. |
-| Session probe | Configuration, Codex health, source-verification state, album progress, and persisted session updates passed from a foreign cwd, using a relative `--codex` path. Creative fixture files remained unchanged. |
-| Missing `cwd` | Removing the manifest's `cwd` in a temporary copy made the session probe fail with Codex's `runtimeStatus='failed'` and launcher startup error. |
-| Dynamic skill count | Adding a synthetic skill to that copy passed registration and MCP source-count checks with 54 skills. |
-| Script checks | Ruff passed; mypy passed for Linux, Windows, and macOS. |
-| Full local gate | `make check` passed: Ruff, the scoped encoding check, Bandit, mypy (72 source files), and pytest (4861 passed, 13 skipped, 1 warning; coverage 90.22%). |
-
-The CI workflow runs both probes on Linux and Windows with the same locked
-Codex executable. At the time of this local verification, the new session step
-and Windows junction cleanup still needed their native Windows CI run; local
-type checking did not establish that result.
-The authenticated configuration/override acceptance below is historical and was
-not repeated for this integration.
-
-### Minimal configuration and overrides acceptance — 2026-10-03
-
-An authenticated, one-off acceptance run passed on macOS arm64, Python 3.11.5,
-and Codex CLI 0.160.0, using plugin version 0.102.0-dev at commit
-`7bd0509fb53cf8e7610365f95f0869bb2f1f9f09`. It reused the synthetic workspace
-and local plugin installation helpers above, with temporary `HOME` and
-`CODEX_HOME`, the project `.venv`, and a cwd outside the installed plugin.
-This was separate from the automated `--model-check` probe.
-
-| Case | Procedure and observed evidence |
-|---|---|
-| Initial configuration | Remove the fixture config and invoke `$bitwize-music:configure setup` without settings. The model requested artist/content/audio/documents settings, and the config file remained absent until answers were supplied. |
-| Save after answers | Supply values through `codex exec resume` in the same conversation. Read the saved YAML: artist casing `probeArtist` and all supplied paths matched exactly, including paths containing spaces and an overrides directory outside the content root. |
-| Specified edit | Invoke `$bitwize-music:configure edit` to change only `paths.audio_root`. Read the YAML and compare all remaining values against the previous config: only the requested path changed. |
-| Configured overrides | Put a unique startup-report marker in the configured overrides `CLAUDE.md`, a pronunciation guide alongside it, and a different marker in the foreign cwd's `CLAUDE.md`. Invoke `$bitwize-music:session-start` in a fresh conversation without disclosing either marker. The configured marker appeared, the cwd marker did not, the configured album was reported, and the actual health call selected `runtime="codex"`. |
-| Missing overrides | Rename the configured overrides directory away and start another fresh conversation. Startup still reported the configured album and optional override files as absent, selected Codex health diagnostics, and included neither marker. |
-
-No failed MCP calls occurred. Synthetic album/track bytes remained unchanged,
-and the temporary authentication copy was explicitly removed. The successful
-configuration and overrides cases required no additional product changes or
-regression tests. This covers conversational setup, a specified edit, and the
-two override cases; it does not establish every optional/reset/overwrite branch
-or a native question-widget interaction.
-
-The same source revision also passed `make check` (exit 0): Ruff, the scoped
-encoding check, Bandit, mypy (72 source files), and pytest (4683 passed,
-13 skipped, coverage 90.05%). That historical revision included an optional
-`numba` typing fix and separate compressor checks. This upstream slice omits
-that change: upstream #579 already resolved the local/CI mypy difference with
-a `numba` override.
+These manual observations are separate from the no-model probe and do not
+establish behavior on platforms or workflows that were not exercised.
 
 ---
 

@@ -79,10 +79,9 @@ See the [shared runtime rules](reference/runtime-compatibility.md) for plugin
 paths and skill invocation. Codex health checks distinguish files on disk from
 skills actually registered by the host.
 
-This compatibility slice covers discovery, MCP, `setup`, `configure`,
-`session-start`, and `resume`. Loading the canonical skills does not establish
-that every downstream creative workflow has been validated in Codex.
-[#548](https://github.com/bitwize-music-studio/claude-ai-music-skills/issues/548) tracks the rest.
+Codex support is experimental. Setup, configuration, session startup, and
+resume are adapted for Codex; [#548](https://github.com/bitwize-music-studio/claude-ai-music-skills/issues/548)
+tracks compatibility for the remaining creative workflows.
 
 ---
 
