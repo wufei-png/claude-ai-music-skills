@@ -2,6 +2,79 @@
 
 Comprehensive testing checklist before marketplace release.
 
+## Codex startup and resume
+
+Install the pinned Codex CLI and use an existing dependency venv:
+
+```bash
+npm ci --prefix tests/e2e/codex --no-audit --no-fund
+python3 tests/e2e/codex_plugin_discovery_check.py --codex tests/e2e/codex/node_modules/.bin/codex
+python3 tests/e2e/codex_session_resume_check.py --codex tests/e2e/codex/node_modules/.bin/codex --venv .venv
+```
+
+The session probe creates temporary `HOME` and `CODEX_HOME` directories and a
+music-project directory outside the plugin. It links the dependency venv into
+that home; on Windows it uses a directory junction. On Windows, use `python`
+and append `.cmd` to the Codex executable path above. Supply `--venv` or
+`--codex` to choose another installation.
+
+**Expected:** Both probes exit 0. Codex discovers the canonical skill set and
+starts the MCP server from the isolated installed copy. Through MCP, the session
+probe checks configuration, Codex health, source-verification state, album
+progress, and persisted session updates; synthetic album and track files remain
+unchanged. CI runs these checks without model turns on Linux and Windows.
+
+To run the optional authenticated model probe:
+
+```bash
+python3 tests/e2e/codex_session_resume_check.py --codex tests/e2e/codex/node_modules/.bin/codex --venv .venv --model-check
+```
+
+This consumes account usage. When available, the probe temporarily copies the
+existing `auth.json` into the isolated Codex home with private permissions.
+The startup prompt requests dependency inspection and `configure show` without
+installing packages. A passing run requires plugin MCP calls to return usable
+JSON without business errors and Codex health to report `ok` or `warn`. The
+resume turn must independently query session context, recommend source
+verification, and persist a fresh session update.
+
+The automated model probe does not independently prove that every setup or
+configuration step ran. It covers this startup/resume workflow, not a fresh
+dependency installation or the downstream music-production pipeline.
+
+### Manual conversational acceptance
+
+Use a separate temporary `HOME` and `CODEX_HOME` (`USERPROFILE` as well on
+Windows), an installed copy of the plugin, and a music workspace outside the
+plugin. Start a new Codex/MCP process in that environment; changing `HOME` in
+an existing session does not redirect its already-running MCP server. Use a
+synthetic album with at least one track awaiting source verification. If using
+a temporary authentication copy, restrict its permissions and remove it after
+testing.
+
+1. With no config in the isolated home, invoke `setup` to inspect dependencies,
+   then invoke `configure setup` without supplying settings. Expect questions
+   for the required fields and no config file until answers are supplied.
+2. Provide an artist and content, audio, documents, and overrides paths. Use a
+   path containing spaces and an overrides directory outside the content root.
+   Expect the saved YAML to preserve the supplied values and artist casing.
+   Change only the audio path with `configure edit` and compare the other fields.
+3. Place a unique marker in the configured overrides `CLAUDE.md` and a different
+   marker in the music workspace's `CLAUDE.md`. Start a fresh `session-start`
+   session without revealing the markers. Expect the configured marker, a
+   `health_check(runtime="codex")` call, and no cwd marker. With the optional
+   overrides directory absent, startup should continue without it.
+4. Resume the synthetic album by name and then in a new session without a name.
+   Expect the source-verification recommendation and the correct album and
+   phase persisted in session state. Missing config should direct the user to
+   configure; an unknown album must not create or invent session progress.
+5. Compare album and track files before and after startup/resume; expect no
+   changes. Record the commit, host, CLI and model settings, tool results,
+   retries, and any cases not exercised.
+
+These manual observations are separate from the no-model probe and do not
+establish behavior on platforms or workflows that were not exercised.
+
 ---
 
 ## Prerequisites
