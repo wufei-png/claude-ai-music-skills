@@ -15,7 +15,9 @@ allowed-tools:
 
 ## Your Task
 
-Read [the shared runtime rules](../../reference/runtime-compatibility.md).
+Read [the shared runtime rules](../../reference/runtime-compatibility.md),
+resolving the link relative to this loaded `SKILL.md`, not the working directory.
+Use the resolved absolute path when reading it with a tool.
 In Codex, resolve the root from this loaded skill and read the plugin's
 `CLAUDE.md` as the shared workflow guide before starting. Apply the runtime
 translations below rather than assuming Claude's session startup ran.

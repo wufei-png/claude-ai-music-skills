@@ -22,10 +22,13 @@ def probe(monkeypatch, project_root):
     return importlib.import_module("codex_session_resume_check")
 
 
-def tool_event(tool, arguments=None):
+def tool_event(tool, arguments=None, *, payload=None, server="bitwize-music-mcp"):
+    if payload is None:
+        payload = {"status": "ok"} if tool == "health_check" else {}
     return {"type": "item.completed", "item": {
-        "type": "mcp_tool_call", "tool": tool, "arguments": arguments or {},
+        "type": "mcp_tool_call", "server": server, "tool": tool, "arguments": arguments or {},
         "status": "completed", "error": None,
+        "result": {"content": [{"type": "text", "text": json.dumps(payload)}]},
     }}
 
 
@@ -112,6 +115,51 @@ def test_model_probe_accepts_independent_resume_and_saved_update(probe, monkeypa
     started = run_model_stub(probe, monkeypatch, tmp_path, "success")
     assert len(started) == 2
     assert probe.read_saved_session(tmp_path)["updated_at"] == "after"
+
+
+@pytest.mark.parametrize("payload", [
+    {"error": "No config in state"},
+    {"status": "fail", "venv": {"status": "no_venv"}},
+    {},
+])
+def test_model_startup_rejects_unsuccessful_health_payload(probe, payload):
+    event = tool_event("health_check", {"runtime": "codex"}, payload=payload)
+    with pytest.raises(probe.ProbeError):
+        probe.check_model_turn([event], resume=False)
+
+
+def test_model_probe_rejects_business_error_even_with_successful_transport(probe):
+    events = [
+        tool_event("health_check", {"runtime": "codex"}),
+        tool_event("get_config", payload={"error": "No config in state"}),
+    ]
+    with pytest.raises(probe.ProbeError, match="get_config"):
+        probe.check_model_turn(events, resume=False)
+
+
+@pytest.mark.parametrize("result", [None, {"content": []}, {"content": [{"type": "text", "text": "not json"}]},
+                                    {"is_error": True, "content": [{"type": "text", "text": "{}"}]}])
+def test_model_probe_rejects_unusable_plugin_result(probe, result):
+    event = tool_event("health_check", {"runtime": "codex"})
+    event["item"]["result"] = result
+    with pytest.raises(probe.ProbeError):
+        probe.check_model_turn([event], resume=False)
+
+
+def test_model_probe_does_not_accept_health_call_from_another_server(probe):
+    event = tool_event("health_check", {"runtime": "codex"}, server="other-server")
+    with pytest.raises(probe.ProbeError, match="Codex health diagnostics"):
+        probe.check_model_turn([event], resume=False)
+
+
+def test_model_probe_accepts_health_warning_and_unrelated_mcp_result(probe):
+    events = [
+        tool_event("health_check", {"runtime": "codex"}, payload={"status": "warn"}),
+        {"type": "item.completed", "item": {"type": "mcp_tool_call", "server": "other-server",
+                                             "tool": "another_tool", "status": "completed", "error": None,
+                                             "result": {"content": [{"type": "text", "text": "plain text"}]}}},
+    ]
+    assert probe.check_model_turn(events, resume=False) == 2
 
 
 @pytest.fixture

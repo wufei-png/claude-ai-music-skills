@@ -28,7 +28,9 @@ allowed-tools:
 
 ## Instructions
 
-Read [the shared runtime rules](../../reference/runtime-compatibility.md).
+Read [the shared runtime rules](../../reference/runtime-compatibility.md),
+resolving the link relative to this loaded `SKILL.md`, not the working directory.
+Use the resolved absolute path when reading it with a tool.
 In Codex, read the resolved plugin root's `CLAUDE.md` as shared workflow
 guidance, use the album name supplied in the user's request, and render skill
 recommendations with the installed skill's advertised name.

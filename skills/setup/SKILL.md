@@ -8,8 +8,18 @@ allowed-tools:
 ---
 
 Read [the shared runtime rules](../../reference/runtime-compatibility.md) before
-running setup. Resolve the installed plugin root from this loaded skill and
-bind `BITWIZE_PLUGIN_ROOT` to its absolute path in each shell call below.
+running setup. Resolve that link relative to this loaded `SKILL.md`, not the
+working directory; use its resolved absolute path when reading it with a tool.
+Resolve the installed plugin root from this skill and bind `BITWIZE_PLUGIN_ROOT`
+to its absolute path in each shell call below.
+
+When giving the user copyable installation commands, replace the example root
+assignment with the actual resolved absolute path, quoted for their shell. Include
+that assignment in the same command block as every use of `BITWIZE_PLUGIN_ROOT`;
+do not output the placeholder or assume a variable set in an assistant shell is
+available in the user's terminal. For native Windows, render commands in the
+user's shell syntax rather than mixing Git Bash with cmd or PowerShell. If the
+installed root cannot be resolved, report that instead of guessing a path.
 
 ## Your Task
 
@@ -108,6 +118,9 @@ All components are installed together in the venv via requirements.txt.
 **Always use the unified venv approach** — it works on all platforms and is automatically detected by the plugin.
 
 ```bash
+# Replace this assignment with the resolved, shell-quoted plugin root.
+BITWIZE_PLUGIN_ROOT='<resolved plugin root>'
+
 # Create unified venv (if it doesn't exist)
 python3 -m venv ~/.bitwize-music/venv                                                    # macOS/Linux/WSL
 py -3 -m venv ~/.bitwize-music/venv                                                       # Windows (native)
@@ -140,6 +153,7 @@ Present a clear, simple installation guide:
 2. **Missing components**: [list what needs to be installed]
 3. **Installation commands**:
    ```bash
+   BITWIZE_PLUGIN_ROOT='<resolved plugin root>'  # Replace with the actual shell-quoted root
    python3 -m venv ~/.bitwize-music/venv                                                  # macOS/Linux/WSL
    "$HOME/.bitwize-music/venv/bin/python3" -m pip install -r "$BITWIZE_PLUGIN_ROOT/requirements.txt" # macOS/Linux/WSL
    ~/.bitwize-music/venv/bin/playwright install chromium                                   # macOS/Linux/WSL
@@ -190,6 +204,9 @@ Use clear sections with checkboxes for status:
 Run these commands to install all plugin dependencies (macOS/Linux/WSL shown; see Step 3 for the Windows native `py -3` / `Scripts\` equivalents):
 
 ```bash
+# Replace with the actual shell-quoted root before presenting this block.
+BITWIZE_PLUGIN_ROOT='<resolved plugin root>'
+
 # Create unified venv
 python3 -m venv ~/.bitwize-music/venv
 

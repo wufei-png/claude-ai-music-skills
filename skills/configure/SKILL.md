@@ -14,10 +14,19 @@ allowed-tools:
 
 ## Your Task
 
-Read [the shared runtime rules](../../reference/runtime-compatibility.md).
+Read [the shared runtime rules](../../reference/runtime-compatibility.md),
+resolving the link relative to this loaded `SKILL.md`, not the working directory.
+Use the resolved absolute path when reading it with a tool.
 Use the user's supplied arguments when the host does not inject `$ARGUMENTS`.
 Ask configuration questions with the host's available tools or conversation,
 and wait for the answers before writing those settings.
+
+For YAML validation in any configuration operation, prefer the plugin venv's
+Python when available (`~/.bitwize-music/venv/bin/python3` or, on Windows, the
+venv's `Scripts/python.exe`), which has the plugin dependencies. If the venv is
+not ready, use another available YAML parser; if none is available, report that
+syntax validation could not be completed. Configuration does not require MCP
+to be running.
 
 **Input**: $ARGUMENTS
 

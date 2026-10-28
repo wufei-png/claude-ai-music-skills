@@ -42,10 +42,28 @@ The isolated invocation preapproves only synthetic state queries and session
 updates so the noninteractive `never` approval policy can run the workflow.
 The startup prompt requests dependency inspection and `configure show`, without
 package installation. Its automated assertions require Codex health diagnostics
-and successful MCP calls; they do not independently prove that setup, configure,
-and every startup step ran. The dated configuration/override acceptance below
+from the plugin with an `ok` or `warn` status. Plugin MCP calls must also return
+JSON results without business errors; a successful transport alone is not enough.
+These assertions do not independently prove that setup, configure, and every
+startup step ran. The dated configuration/override acceptance below
 records those separate observations. These checks cover the startup/resume slice,
 not the full downstream music-production pipeline.
+
+### Isolated macOS model acceptance — 2026-10-23
+
+At commit `787b8e8`, an independent acceptance used Codex CLI 0.162.1 and
+`gpt-6-luna` with max reasoning against a synthetic workspace and installed
+plugin copy. Real model turns covered setup checks, interactive configuration,
+configured and missing overrides, startup, named and session-based resume,
+missing configuration, and an unknown album. A separate cold-start turn rebuilt
+the absent state cache. The source-verification gate and session persistence
+were checked against actual results; creative fixture files were unchanged.
+
+Some tool calls initially failed and were retried, including relative document
+reads and YAML validation with a system interpreter lacking PyYAML. The cases
+above completed after recovery. This is historical macOS evidence, not a run
+of the optional automated model probe or proof of native Windows/Linux model
+behavior, a fresh dependency installation, or downstream production workflows.
 
 ### Upstream integration verification — 2026-10-22
 
@@ -64,8 +82,9 @@ authentication copy:
 | Full local gate | `make check` passed: Ruff, the scoped encoding check, Bandit, mypy (72 source files), and pytest (4861 passed, 13 skipped, 1 warning; coverage 90.22%). |
 
 The CI workflow runs both probes on Linux and Windows with the same locked
-Codex executable. The new session step and Windows junction cleanup still need
-their native Windows CI run; local type checking does not establish that result.
+Codex executable. At the time of this local verification, the new session step
+and Windows junction cleanup still needed their native Windows CI run; local
+type checking did not establish that result.
 The authenticated configuration/override acceptance below is historical and was
 not repeated for this integration.
 

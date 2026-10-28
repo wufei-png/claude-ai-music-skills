@@ -168,19 +168,51 @@ def check_workflow(probe: SessionProbe, home: Path, *, expected_skill_count: int
     require(saved["session"]["last_album"] == ALBUM, "Session was not persisted")
 
 
+def model_tool_payload(call: dict[str, Any]) -> dict[str, Any]:
+    """Read the installed plugin's JSON result, including business failures."""
+    tool = call.get("tool")
+    result = call.get("result")
+    if not isinstance(result, dict):
+        raise ProbeError(f"Model MCP {tool} returned no result")
+    require(not result.get("is_error") and not result.get("isError"), f"Model MCP {tool} returned an error")
+    content = result.get("content")
+    if not isinstance(content, list):
+        raise ProbeError(f"Model MCP {tool} returned no content")
+    text_blocks: list[str] = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "text":
+            value = block.get("text")
+            if isinstance(value, str):
+                text_blocks.append(value)
+    require(bool(text_blocks), f"Model MCP {tool} returned no text")
+    try:
+        payload = json.loads(text_blocks[0])
+    except ValueError as exc:
+        raise ProbeError(f"Model MCP {tool} returned invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise ProbeError(f"Model MCP {tool} returned a non-object result")
+    require("error" not in payload, f"Model MCP {tool} returned a business error: {payload.get('error')}")
+    if tool == "health_check":
+        require(payload.get("status") in ("ok", "warn"), f"Model MCP health_check failed: {payload}")
+    return payload
+
+
 def check_model_turn(events: list[dict[str, Any]], *, resume: bool) -> int:
     """Require each turn to supply its own workflow evidence."""
     calls = [e["item"] for e in events if e.get("type") == "item.completed"
              and e.get("item", {}).get("type") == "mcp_tool_call"]
     failures = [{"tool": c.get("tool"), "status": c.get("status"), "error": c.get("error")}
-                for c in calls if c.get("status") == "failed" or c.get("error")]
+                for c in calls if c.get("status") != "completed" or c.get("error")]
     require(not failures, f"Model workflow included failed MCP calls: {failures}")
+    plugin_calls = [c for c in calls if c.get("server") == EXPECTED_MCP_SERVER]
+    for call in plugin_calls:
+        model_tool_payload(call)
     if not resume:
         require(any(c.get("tool") == "health_check" and c.get("arguments", {}).get("runtime") == "codex"
-                    for c in calls), "Startup did not select Codex health diagnostics")
+                    for c in plugin_calls), "Startup did not select Codex health diagnostics")
         return len(calls)
 
-    tools = {c.get("tool") for c in calls}
+    tools = {c.get("tool") for c in plugin_calls}
     messages = [e["item"].get("text", "") for e in events if e.get("type") == "item.completed"
                 and e.get("item", {}).get("type") == "agent_message"]
     answer = "\n".join(messages)
@@ -190,7 +222,7 @@ def check_model_turn(events: list[dict[str, Any]], *, resume: bool) -> int:
                 and c.get("arguments", {}).get("album") == ALBUM
                 and c.get("arguments", {}).get("phase") == "Source Verification"
                 and not c.get("arguments", {}).get("clear", False)
-                for c in calls), "Resume did not update the expected album and phase")
+                for c in plugin_calls), "Resume did not update the expected album and phase")
     require("Probe Album" in answer and "verify-sources" in answer, "Resume missed album/source gate")
     require("$bitwize-music:verify-sources" in answer, "Resume used the wrong invocation syntax")
     return len(calls)
