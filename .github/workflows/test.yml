@@ -376,17 +376,28 @@ jobs:
         GH_TOKEN: ${{ github.token }}
         OS: ${{ matrix.os }}
       run: |
+        ready=false
+        results=""
         for attempt in 1 2 3; do
           if results=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?filter=latest&per_page=100" \
               --jq '.jobs[] | select(.name | startswith("Tests (" + env.OS + ", shard ")) | "\(.conclusion) \(.name)"'); then
-            break
+            # The API can return null conclusions even after needs completes.
+            if [ "$(grep -c ' Tests (' <<<"$results" || true)" -eq 2 ] &&
+               grep -qF " Tests ($OS, shard 1/2)" <<<"$results" &&
+               grep -qF " Tests ($OS, shard 2/2)" <<<"$results" &&
+               ! grep -q '^null ' <<<"$results"; then
+              ready=true
+              break
+            fi
+            echo "Shard results not ready (attempt $attempt/3)"
+          else
+            echo "Jobs API call $attempt failed"
+            results=""
           fi
-          echo "jobs API call $attempt failed; retrying"
-          results=""
-          sleep 10
+          if [ "$attempt" -lt 3 ]; then sleep 10; fi
         done
         echo "$results"
-        if [ "$(grep -c '^success ' <<<"$results")" -ne 2 ]; then
+        if [ "$ready" != true ] || [ "$(grep -c '^success ' <<<"$results" || true)" -ne 2 ]; then
           echo "::error::expected 2 successful shards for $OS"
           exit 1
         fi
