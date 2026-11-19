@@ -63,23 +63,35 @@ Then run `/bitwize-music:setup` to detect your environment and install dependenc
 
 ### OpenAI Codex (experimental)
 
-Codex can install the plugin from this repository too:
+Install the plugin from GitHub.
 
 ```bash
 codex plugin marketplace add bitwize-music-studio/claude-ai-music-skills
 codex plugin add bitwize-music@bitwize-music
 ```
 
-All 61 skills load, and the MCP server runs from the same `~/.bitwize-music/venv` that Claude Code uses, on macOS, Linux and Windows. The `setup` skill still assumes Claude Code, so if you haven't set the plugin up there, create the venv by hand (Python 3.11+):
+To use a local checkout, register its path.
 
 ```bash
-python3 -m venv ~/.bitwize-music/venv
-~/.bitwize-music/venv/bin/python -m pip install -r https://raw.githubusercontent.com/bitwize-music-studio/claude-ai-music-skills/main/requirements.txt
+codex plugin marketplace add /absolute/path/to/this/checkout
+codex plugin add bitwize-music@bitwize-music
 ```
 
-On Windows (cmd), run `python -m venv %USERPROFILE%\.bitwize-music\venv`, then `%USERPROFILE%\.bitwize-music\venv\Scripts\python.exe -m pip install -r` with the same URL.
+In a new Codex session, run `$bitwize-music:setup`, then
+`$bitwize-music:configure`. You can also select the skills in the skill picker.
+Setup reads the requirements from the installed plugin, so you can run it from
+your music workspace. Codex and Claude Code share the configuration and the
+Python 3.11+ venv at `~/.bitwize-music/venv`.
 
-So far Codex support covers discovery and the MCP tools, and many skills still assume Claude Code. [#548](https://github.com/bitwize-music-studio/claude-ai-music-skills/issues/548) tracks the rest.
+Run `$bitwize-music:session-start` at the start of a music session. Use
+`$bitwize-music:resume my-album` to resume an album by name, or omit the name
+to use saved session context. Both skills load your configured overrides and
+follow the shared workflow's source-verification rules.
+
+See the [shared runtime rules](reference/runtime-compatibility.md) for skill
+names and plugin paths.
+[#548](https://github.com/bitwize-music-studio/claude-ai-music-skills/issues/548)
+tracks compatibility for other workflows.
 
 ---
 
@@ -192,6 +204,7 @@ config/              Example config and setup docs
 <a href="https://github.com/medinabestari"><img src="https://images.weserv.nl/?url=github.com/medinabestari.png&h=60&w=60&fit=cover&mask=circle" width="60" height="60" alt="@medinabestari"></a>
 <a href="https://github.com/cbrahms"><img src="https://images.weserv.nl/?url=github.com/cbrahms.png&h=60&w=60&fit=cover&mask=circle" width="60" height="60" alt="@cbrahms"></a>
 <a href="https://github.com/wufei-png"><img src="https://images.weserv.nl/?url=github.com/wufei-png.png&h=60&w=60&fit=cover&mask=circle" width="60" height="60" alt="@wufei-png"></a>
+<a href="https://github.com/divya0795"><img src="https://images.weserv.nl/?url=github.com/divya0795.png&h=60&w=60&fit=cover&mask=circle" width="60" height="60" alt="@divya0795"></a>
 
 If you make something with this, I'd genuinely love to hear it — [@bitwizemusic](https://x.com/bitwizemusic) on X, [join the Discord](https://discord.gg/dMURByGF), or [open a discussion](https://github.com/bitwize-music-studio/claude-ai-music-skills/discussions).
 
