@@ -9,7 +9,10 @@ allowed-tools:
   - Edit
   - Bash
   - bitwize-music-mcp
-  - mcp__suno__*
+  - mcp__suno__account-usage
+  - mcp__suno__audio-download
+  - mcp__suno__audio-like
+  - mcp__suno__audio-unlike
 ---
 
 ## Your Task
@@ -95,7 +98,7 @@ A local file, or a take with `cached: true`, plays at once: `play_audio(path, st
 
 ## Step 4: Terminal Mode — Take Not Cached Yet
 
-1. Run § Preflight in `${CLAUDE_PLUGIN_ROOT}/reference/suno/mcp-api-mapping.md`. If the Suno server is not available, say so and use Browser Mode.
+1. Run § Preflight in `${CLAUDE_PLUGIN_ROOT}/reference/suno/mcp-api-mapping.md` and keep `suno_account.download_credits_remaining` from its `account-usage` read. If the Suno server is not available, say so and use Browser Mode.
 2. For each take to play that is not cached, call `audio-download(id: <clip_id>, format: "mp3")` **without** `confirm`. Leave about two seconds between download calls.
 
    | Answer | Do |
@@ -178,7 +181,7 @@ When the user has heard the takes, ask which one to keep, or whether to regenera
 6. `prune_takes_cache(dry_run: false)` — the audition copies of a track that now has a keeper are no longer needed. Skip it when nothing was played in the terminal.
 7. Offer `/bitwize-music:import-audio --from-suno <album> <track>`. It is free for a take that was played in the terminal.
 
-**They reject them all:** `close_song_panes` if the takes were opened in iTerm2 panes. Add the reason to the Notes of those rows, then follow the Regeneration Workflow in CLAUDE.md — a style problem goes to `/bitwize-music:suno-engineer`, a lyrics problem to `/bitwize-music:lyric-writer`, bad luck is another `/bitwize-music:generate`.
+**They reject them all:** `close_song_panes` if the takes were opened in iTerm2 panes. Add the reason to the Notes of those rows, then follow the Regeneration Workflow in `${CLAUDE_PLUGIN_ROOT}/reference/workflows/status-tracking.md` — a style problem goes to `/bitwize-music:suno-engineer`, a lyrics problem to `/bitwize-music:lyric-writer`, bad luck is another `/bitwize-music:generate`.
 
 **They have not decided:** leave everything as it is, open panes included.
 

@@ -134,6 +134,52 @@ def _isolate_iterm(monkeypatch, tmp_path):
     )
 
 
+SERVER_DIR = PROJECT_ROOT / "servers" / "bitwize-music-server"
+
+
+class _EmptyStateCache:
+    """A state cache holding no albums, what the server has before its first scan."""
+
+    def __init__(self) -> None:
+        self._state: dict[str, Any] = {"albums": {}, "ideas": {}, "session": {}}
+
+    def get_state(self) -> dict[str, Any]:
+        return self._state
+
+    def get_state_ref(self) -> dict[str, Any]:
+        return self._state
+
+
+@pytest.fixture(autouse=True)
+def _isolate_handler_state_cache(monkeypatch):
+    """Give every test the server's state cache it started with, or an empty one.
+
+    ``handlers._shared.cache`` is ``None`` until ``server.py`` sets it, and the
+    handlers read it directly (``_track_fade_out``, ``_derive_album_genre``, the
+    gates). A test that drives a handler without loading ``server.py`` or
+    installing a fake cache therefore passed only when an earlier test on the
+    same xdist worker had left a cache behind, and failed when run alone or
+    sharded differently (#651, #670). Other tests assigned ``_shared.cache``
+    directly and never put it back, which is how caches got left behind.
+
+    So for every test: when there is no cache, install an empty one; either
+    way, restore the original afterwards, however the test changed it. A test
+    that needs ``cache is None`` still sets it itself (``patch.object`` or
+    assignment), which runs after this.
+    """
+    if str(SERVER_DIR) not in sys.path:
+        # Appended, not inserted first, so server.py cannot shadow anything.
+        sys.path.append(str(SERVER_DIR))
+    try:
+        import handlers._shared as shared
+    except ImportError:
+        return
+    original = shared.cache
+    # setattr records the original for monkeypatch to restore at teardown, even
+    # when the value is unchanged here.
+    monkeypatch.setattr(shared, "cache", original if original is not None else _EmptyStateCache())
+
+
 @pytest.fixture(autouse=True)
 def _isolate_browser_launch(monkeypatch):
     """Keep every test from starting a real browser app.
@@ -246,13 +292,37 @@ def all_skill_frontmatter(all_skill_dirs) -> Dict[str, Dict[str, Any]]:
     return skills
 
 
+def _expand_imports(path: Path, seen: set[Path] | None = None) -> str:
+    """A memory file's text with its ``@path`` import lines replaced by the files.
+
+    Claude Code expands a line that is just ``@some/file.md`` into that file's
+    contents. Since #664 ``CLAUDE.md`` is only ``@AGENTS.md`` and
+    ``@reference/plugin-rules.md``, so the instructions a session in this repo
+    gets are the expanded text, not the two lines.
+    """
+    seen = set() if seen is None else seen
+    path = path.resolve()
+    if path in seen or not path.exists():
+        return ""
+    seen.add(path)
+    parts = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if stripped.startswith("@") and " " not in stripped and len(stripped) > 1:
+            parts.append(_expand_imports(path.parent / stripped[1:], seen))
+        else:
+            parts.append(line)
+    return "\n".join(parts) + "\n"
+
+
 @pytest.fixture(scope="session")
 def claude_md_content(project_root) -> str:
-    """Contents of CLAUDE.md."""
-    claude_file = project_root / "CLAUDE.md"
-    if claude_file.exists():
-        return claude_file.read_text(encoding="utf-8")
-    return ""
+    """The instructions CLAUDE.md gives a session, ``@`` imports expanded.
+
+    That is ``AGENTS.md`` (contributor rules) plus ``reference/plugin-rules.md``
+    (the rules the SessionStart hook gives plugin users).
+    """
+    return _expand_imports(project_root / "CLAUDE.md")
 
 
 # ---------------------------------------------------------------------------

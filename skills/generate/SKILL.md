@@ -10,7 +10,20 @@ allowed-tools:
   - Read
   - Edit
   - bitwize-music-mcp
-  - mcp__suno__*
+  - mcp__suno__account-upgrade
+  - mcp__suno__account-usage
+  - mcp__suno__audio-covers-create
+  - mcp__suno__audio-create
+  - mcp__suno__audio-like
+  - mcp__suno__audio-unlike
+  - mcp__suno__audio-wait
+  - mcp__suno__midi-upload-complete
+  - mcp__suno__midi-upload-create
+  - mcp__suno__speech-create
+  - mcp__suno__voices-list
+  - mcp__suno__workspaces-create
+  - mcp__suno__workspaces-list
+  - mcp__suno__workspaces-update-clips
 ---
 
 ## Your Task
@@ -182,7 +195,7 @@ Then continue straight into `/bitwize-music:listen` for those two rows, in the w
 
 Skip the hand-off when the user passed `--no-listen` or answered "generate only".
 
-**Take check.** Once the takes are open, run `/bitwize-music:check-take <album> <track>` for those two rows and show its report. It asks Suno's listening agent whether each take sings the lyrics as written and matches the tempo, voice and exclusions; it is free and takes about a minute, so the user reads it while listening. Skip it when the user passed `--no-check` or its plan says `enabled: false` (`generation.take_check: false`). Then ask which take to keep. The report informs that choice; it never makes it.
+**Take check.** Once the takes are open, run `/bitwize-music:check-take <album> <track>` for those two rows and show its report. It asks Suno's listening agent whether each take sings the lyrics as written and matches the tempo, voice and exclusions, and reads back the model, Variety, Max Mode and exclusions Suno made each take with; it is free and takes about a minute, so the user reads it while listening. Skip it when the user passed `--no-check` or its plan says `enabled: false` (`generation.take_check: false`). Then ask which take to keep. The report informs that choice; it never makes it.
 
 ## Approving a Take
 
@@ -194,7 +207,7 @@ Approval is the user's call and is not part of generating. When they name the ke
 4. If the listen plan's `like_keeper` is true and the take has a `clip_id`, call `audio-like(id: <clip_id>)` so the keeper shows as liked on suno.com. If a different take of this track carried the ✓ before, clear its like with `audio-unlike`. Never dislike a rejected take: a dislike is a rating only the user gives, it feeds Suno's taste profile, and it deletes nothing.
 5. Offer `/bitwize-music:import-audio --from-suno <album> <track>`. It is free for a take that was played in the terminal.
 
-When they reject both takes, add the reason to the Notes of those rows, then follow the Regeneration Workflow in CLAUDE.md: a style problem goes to `/bitwize-music:suno-engineer`, a lyrics problem to `/bitwize-music:lyric-writer`, and plain bad luck is another `/generate`.
+When they reject both takes, add the reason to the Notes of those rows, then follow the Regeneration Workflow in `${CLAUDE_PLUGIN_ROOT}/reference/workflows/status-tracking.md`: a style problem goes to `/bitwize-music:suno-engineer`, a lyrics problem to `/bitwize-music:lyric-writer`, and plain bad luck is another `/generate`.
 
 ## Album Mode
 
@@ -264,6 +277,6 @@ Or generate it on suno.com now:
 1. **Gates, then cost, then a go-ahead** — in that order, every time.
 2. **One call makes two takes and spends credits.** One go-ahead covers one call — or, in Album Mode, exactly the calls its summary listed.
 3. **Send only what `get_generation_request` returned.** The mapping lives in that tool, not in your head.
-4. **The live tool definition wins.** Suno's server is in beta and its arguments change.
+4. **The live tool definition wins.** Suno still changes its server's arguments.
 5. **You never pick a take, mark a keeper, set `Final` or publish.** A human listens first.
 6. **Each album's takes are filed in its own workspace**, made at the first generation and recorded in the album README. Creating and filing are free; nothing is deleted or published.

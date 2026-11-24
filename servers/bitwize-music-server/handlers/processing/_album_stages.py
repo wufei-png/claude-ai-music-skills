@@ -24,11 +24,8 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
-from math import gcd
 from pathlib import Path
 from typing import Any
-
-from scipy import signal
 
 from handlers import _shared
 from handlers._atomic import atomic_write_text
@@ -71,7 +68,11 @@ from tools.mastering.coherence import (
 from tools.mastering.coherence import (
     load_tolerances as _coherence_load_tolerances,
 )
-from tools.mastering.config import build_effective_preset
+from tools.mastering.config import (
+    adm_global_setting_note,
+    build_effective_preset,
+    load_mastering_config,
+)
 from tools.mastering.layout import (
     LayoutError,
 )
@@ -84,7 +85,6 @@ from tools.mastering.layout import (
 from tools.mastering.layout import (
     render_layout_markdown as _layout_render_markdown,
 )
-from tools.mastering.master_tracks import limit_peaks
 from tools.mastering.metadata import (
     MetadataEmbedError,
 )
@@ -122,8 +122,8 @@ class MasterAlbumCtx:
     # ── inputs (set at construction) ─────────────────────────────────────────
     album_slug: str
     genre: str
-    target_lufs: float
-    ceiling_db: float
+    target_lufs: float | None  # None = not passed: preset > config decides
+    ceiling_db: float | None
     # None = "use the genre preset's cut"; an explicit 0.0 disables it
     # (#556 — same sentinel master_audio uses).
     cut_highmid: float | None
@@ -188,7 +188,12 @@ class MasterAlbumCtx:
 
     # ── stage 4 (mastering) ──────────────────────────────────────────────────
     output_dir: Path | None = None
+    # The masters of this run's sources, in track order: the album's tracks.
+    # Other WAVs in mastered/ are strays (stages["mastering"]["stray_wavs"]).
     mastered_files: list[Path] = field(default_factory=list)
+    # Sources master_track skipped (no measurable loudness), across ADM
+    # cycles: a master of one in mastered/ is left from an earlier run.
+    skipped_sources: set[str] = field(default_factory=set)
 
     # ── stage 5 (verification) ───────────────────────────────────────────────
     verify_results: list[dict[str, Any]] = field(default_factory=list)
@@ -420,6 +425,12 @@ async def _stage_pre_flight(ctx: MasterAlbumCtx) -> str | None:
     ctx.effective_highmid = ctx.settings["cut_highmid"]
     ctx.effective_highs = ctx.settings["cut_highs"]
     ctx.effective_compress = ctx.effective_preset["compress_ratio"]
+
+    # A global ADM switch is not honoured (album frontmatter only); say so
+    # instead of skipping validation silently (#683).
+    adm_note = adm_global_setting_note(load_mastering_config(), ctx.album_mastering or None)
+    if adm_note:
+        ctx.warnings.append(adm_note)
     return None
 
 
@@ -581,22 +592,30 @@ async def _stage_anchor_selection(ctx: MasterAlbumCtx) -> str | None:
         frozen_anchor = ctx.frozen_signature.get("anchor") or {}
         frozen_targets = ctx.frozen_signature.get("delivery_targets") or {}
 
+        selected_index, frozen_reason = _frozen_anchor_index(ctx, frozen_anchor)
         ctx.anchor_result = {
-            "selected_index": frozen_anchor.get("index"),
+            "selected_index": selected_index,
             "method": "frozen_signature",
             "override_index": None,
             "override_reason": None,
             "scores": [],
         }
         ctx.stages["anchor_selection"] = {
-            "status": "pass" if ctx.anchor_result["selected_index"] is not None else "warn",
-            "selected_index": ctx.anchor_result["selected_index"],
+            "status": "pass" if selected_index is not None else "warn",
+            "selected_index": selected_index,
             "method": "frozen_signature",
             "override_index": None,
             "override_reason": None,
             "scores": [],
             "frozen_from": frozen_anchor.get("filename"),
         }
+        if frozen_reason:
+            ctx.stages["anchor_selection"]["reason"] = frozen_reason
+            ctx.warnings.append(
+                f"Anchor selection: the frozen anchor "
+                f"{frozen_anchor.get('filename')} is not among this run's "
+                f"sources; coherence checks run without an anchor."
+            )
 
         for k, sig_key in (
             ("target_lufs",        "target_lufs"),
@@ -658,8 +677,11 @@ async def _stage_anchor_selection(ctx: MasterAlbumCtx) -> str | None:
             anchor_override = raw_override
 
         anchor_preset = ctx.preset_dict or {}
+        # The limiter penalty is taken at this run's target and ceiling: the
+        # limiting each source will actually get (#681).
         ctx.anchor_result = select_anchor(
             ctx.analysis_results, anchor_preset, override_index=anchor_override,
+            target_lufs=ctx.effective_lufs, ceiling_db=ctx.effective_ceiling,
         )
         ctx.stages["anchor_selection"] = {
             "status": "pass" if ctx.anchor_result["selected_index"] is not None else "warn",
@@ -669,12 +691,42 @@ async def _stage_anchor_selection(ctx: MasterAlbumCtx) -> str | None:
             "override_reason": ctx.anchor_result["override_reason"],
             "scores": ctx.anchor_result["scores"],
         }
+        if anchor_override is not None and ctx.anchor_result["method"] != "override":
+            # The README names an anchor this run cannot use (#668): say so
+            # rather than let composite scoring stand in for it unnoticed.
+            ctx.stages["anchor_selection"]["status"] = "warn"
+            ctx.warnings.append(
+                f"Anchor selection: README anchor_track {anchor_override} not "
+                f"used ({ctx.anchor_result['override_reason']})."
+            )
         if ctx.anchor_result["selected_index"] is None:
             ctx.warnings.append(
                 "Anchor selector: no eligible tracks (signature metrics missing). "
                 "Mastering proceeds without an anchor; coherence correction disabled."
             )
     return None
+
+
+def _frozen_anchor_index(
+    ctx: MasterAlbumCtx, frozen_anchor: dict[str, Any],
+) -> tuple[int | None, str | None]:
+    """The frozen anchor's 1-based position among this run's sources.
+
+    The signature stores the anchor's position in the sources it was written
+    from and its file name. The sources may have changed since (a renamed
+    track, a removed one), so the position can name another track today:
+    find the anchor by its file name (#668). Returns ``(None, reason)`` when
+    that file is not among the sources. A signature without a file name
+    keeps its stored position, as before.
+    """
+    frozen_index = frozen_anchor.get("index")
+    frozen_name = frozen_anchor.get("filename")
+    if not frozen_name:
+        return frozen_index, None
+    for i, result in enumerate(ctx.analysis_results, start=1):
+        if result.get("filename") == frozen_name:
+            return i, None
+    return None, "frozen_anchor_not_in_sources"
 
 
 async def _stage_pre_qc(ctx: MasterAlbumCtx) -> str | None:
@@ -754,6 +806,31 @@ async def _stage_pre_qc(ctx: MasterAlbumCtx) -> str | None:
     return None
 
 
+# Where the pre-dither float of each master waits for the archival stage
+# (#681). Every writer into mastered/ (mastering, auto-recovery, coherence
+# re-masters) drops its float here, the ceiling guard applies its pull-down
+# to it too, and _stage_archival moves the survivors into archival/.
+_ARCHIVAL_STAGING_DIRNAME = ".archival_staging"
+
+
+def _tolerance_source(ctx: MasterAlbumCtx) -> dict[str, Any]:
+    """The preset the coherence tolerances and LRA floor are read from.
+
+    ``effective_preset`` over ``preset_dict``: a frozen re-master stores the
+    signature's tolerances in ``effective_preset`` (stage 2b), and they must
+    win over the genre's current values (#681). In a fresh run
+    ``effective_preset`` already carries the genre preset's own values.
+    """
+    return {**(ctx.preset_dict or {}), **(ctx.effective_preset or {})}
+
+
+def _archival_float_path(ctx: MasterAlbumCtx, fname: str) -> Path | None:
+    """The staged archival float for ``fname``, or None when archival is off."""
+    if not ctx.targets.get("archival_enabled") or ctx.audio_dir is None:
+        return None
+    return ctx.audio_dir / _ARCHIVAL_STAGING_DIRNAME / fname
+
+
 async def _stage_mastering(ctx: MasterAlbumCtx) -> str | None:
     """Stage 4: Normalize loudness, apply EQ, limit peaks for all tracks.
 
@@ -761,7 +838,8 @@ async def _stage_mastering(ctx: MasterAlbumCtx) -> str | None:
                effective_ceiling, effective_highmid, effective_highs,
                effective_compress, effective_preset, source_dir, targets, loop,
                remaster_filenames, track_ceilings
-    Sets ctx:  output_dir, mastered_files
+    Sets ctx:  output_dir, mastered_files (the masters of wav_files only),
+               skipped_sources
     Returns: None on success, failure JSON if no tracks processed.
 
     Selective remaster: when ctx.remaster_filenames is a set, only those
@@ -789,6 +867,12 @@ async def _stage_mastering(ctx: MasterAlbumCtx) -> str | None:
 
     remaster_set = ctx.remaster_filenames
 
+    # A full mastering pass replaces every archival float; a stale one left
+    # by an earlier run that halted must not reach archival/.
+    archival_staging = ctx.audio_dir / _ARCHIVAL_STAGING_DIRNAME
+    if remaster_set is None and archival_staging.exists():
+        _shutil.rmtree(archival_staging)
+
     try:
         master_results = []
         for wav_file in ctx.wav_files:
@@ -813,6 +897,7 @@ async def _stage_mastering(ctx: MasterAlbumCtx) -> str | None:
                 fade: float | None,
                 comp: float,
                 p: dict[str, Any],
+                arch: Path | None,
             ) -> dict[str, Any]:
                 return _master_track(
                     str(in_path), str(out_path),
@@ -822,16 +907,20 @@ async def _stage_mastering(ctx: MasterAlbumCtx) -> str | None:
                     fade_out=fade,
                     compress_ratio=comp,
                     preset=p,
+                    archival_path=arch,
                 )
 
             result = await ctx.loop.run_in_executor(
                 None, _do_master, wav_file, output_path,
                 ctx.effective_lufs, per_track_ceiling, fade_out_val,
                 ctx.effective_compress, ctx.effective_preset,
+                _archival_float_path(ctx, fname),
             )
             if result and not result.get("skipped"):
                 result["filename"] = fname
                 master_results.append(result)
+            else:
+                ctx.skipped_sources.add(fname)
     except Exception:
         if staging_dir.exists():
             _shutil.rmtree(staging_dir)
@@ -861,17 +950,39 @@ async def _stage_mastering(ctx: MasterAlbumCtx) -> str | None:
         os.replace(str(staged_file), str(output_dir / staged_file.name))
     staging_dir.rmdir()
 
+    # The album's tracks are this run's sources, not whatever sits in
+    # mastered/ (#668). A master no source matches (the old master of a
+    # renamed or removed track), or one whose source mastering skipped this
+    # time, is a stray: reported, and left out of verification, coherence,
+    # metadata, archival, LAYOUT.md and the playlist, which would otherwise
+    # hold it to this run's targets or ship it as a track.
+    track_names = {w.name for w in ctx.wav_files} - ctx.skipped_sources
+    ctx.mastered_files = sorted(
+        output_dir / name for name in track_names if (output_dir / name).is_file()
+    )
+    stray_wavs = sorted(
+        f.name for f in output_dir.iterdir()
+        if f.is_file() and f.suffix.lower() == ".wav" and f.name not in track_names
+    )
+
     ctx.stages["mastering"] = {
-        "status": "pass",
+        "status": "warn" if stray_wavs else "pass",
         "tracks_processed": len(master_results),
         "settings": ctx.settings,
         "output_dir": str(output_dir),
     }
+    if stray_wavs:
+        ctx.stages["mastering"]["stray_wavs"] = stray_wavs
+        message = (
+            f"Mastering: {len(stray_wavs)} WAV(s) in mastered/ match no track "
+            f"mastered in this run and were left out of verification, coherence, "
+            f"metadata, archival, LAYOUT.md and the playlist: "
+            f"{', '.join(stray_wavs)}. Move them out of mastered/ before release."
+        )
+        # One warning per album, however many ADM cycles re-run this stage.
+        if message not in ctx.warnings:
+            ctx.warnings.append(message)
     ctx.output_dir = output_dir
-    ctx.mastered_files = sorted([
-        f for f in output_dir.iterdir()
-        if f.suffix.lower() == ".wav" and "venv" not in str(f)
-    ])
     return None
 
 
@@ -947,8 +1058,7 @@ async def _stage_verification(ctx: MasterAlbumCtx) -> str | None:
     Returns: None on pass (all within spec), failure JSON otherwise.
     """
     from tools.mastering.analyze_tracks import analyze_track
-    from tools.mastering.fix_dynamic_track import fix_dynamic
-    from tools.mastering.master_tracks import apply_fade_out
+    from tools.mastering.fix_dynamic_track import fix_dynamic_to_file
 
     assert ctx.output_dir is not None and ctx.source_dir is not None and ctx.audio_dir is not None
 
@@ -995,18 +1105,11 @@ async def _stage_verification(ctx: MasterAlbumCtx) -> str | None:
                 recoverable.append(spec["filename"])
 
         if recoverable:
-            import numpy as _np
-            import soundfile as sf
-
             eq_settings = []
             if ctx.effective_highmid != 0:
                 eq_settings.append((3500.0, ctx.effective_highmid, 1.5))
             if ctx.effective_highs != 0:
                 eq_settings.append((8000.0, ctx.effective_highs, 0.7))
-
-            recovery_subtype = (
-                "PCM_24" if ctx.targets["output_bits"] > 16 else "PCM_16"
-            )
 
             for fname in recoverable:
                 raw_path = ctx.source_dir / fname
@@ -1015,53 +1118,31 @@ async def _stage_verification(ctx: MasterAlbumCtx) -> str | None:
                 if not raw_path.exists():
                     continue
 
-                def _do_recovery(
-                    src: Path,
-                    dst: Path,
-                    lufs: float,
-                    eq: list[tuple[float, float, float]],
-                    ceil: float,
-                    subtype: str,
-                    target_rate: int,
-                    fade: float | None,
-                ) -> dict[str, Any]:
-                    data, rate = sf.read(str(src))
-                    if len(data.shape) == 1:
-                        data = _np.column_stack([data, data])
-                    # Recovery re-processes the source, so it needs the
-                    # track's fade too; before the loudness work, as in
-                    # master_track.
-                    if fade:
-                        data = apply_fade_out(data, rate, duration=fade)
-                    data, metrics = fix_dynamic(
-                        data, rate,
-                        target_lufs=lufs,
-                        eq_settings=eq if eq else None,
-                        ceiling_db=ceil,
-                    )
-                    # Match _stage_mastering's delivery-format SRC so
-                    # recovered tracks don't end up at a different sample
-                    # rate from the rest of the album (bug #1).
-                    src_rate = rate
-                    if target_rate and target_rate != src_rate:
-                        g = gcd(target_rate, src_rate)
-                        data = signal.resample_poly(
-                            data, up=target_rate // g, down=src_rate // g, axis=0,
-                        )
-                        rate = target_rate
-                        # Polyphase FIR ripple reintroduces sub-dB inter-sample
-                        # peaks — match _stage_mastering's final guard pass.
-                        data = limit_peaks(data, ceil)
-                    sf.write(str(dst), data, rate, subtype=subtype)
-                    return metrics
-
+                # Recovery re-processes the source (with the track's fade)
+                # and writes through the same delivery tail as the
+                # fix_dynamic_track tool: the album's bit depth, sample rate
+                # and true-peak ceiling (#681, bug #1), and the archival
+                # float when archival is on.
                 mastered_path = ctx.output_dir / fname
-                _delivery_rate = int(ctx.targets.get("output_sample_rate") or 0)
                 metrics = await ctx.loop.run_in_executor(
-                    None, _do_recovery, raw_path, mastered_path,
-                    effective_lufs, eq_settings, effective_ceiling,
-                    recovery_subtype, _delivery_rate,
-                    _helpers._track_fade_out(ctx.album_slug, fname),
+                    None,
+                    functools.partial(
+                        fix_dynamic_to_file,
+                        raw_path, mastered_path,
+                        target_lufs=effective_lufs,
+                        # An empty list is "no EQ": the run's cuts are
+                        # disabled. None would let fix_dynamic fall back to
+                        # its own -2 dB high-mid cut, which ignored an
+                        # explicit cut_highmid=0 (#556, #683).
+                        eq_settings=eq_settings,
+                        ceiling_db=effective_ceiling,
+                        output_bits=ctx.targets["output_bits"],
+                        output_sample_rate=int(
+                            ctx.targets.get("output_sample_rate") or 0
+                        ),
+                        fade_out=_helpers._track_fade_out(ctx.album_slug, fname),
+                        archival_path=_archival_float_path(ctx, fname),
+                    ),
                 )
                 auto_recovered.append({
                     "filename":       fname,
@@ -1289,10 +1370,42 @@ def _coherence_finalize_stage(
     return stage
 
 
+def _anchor_position(
+    ctx: MasterAlbumCtx, results: list[dict[str, Any]],
+) -> int | None:
+    """1-based position of the anchor track in ``results``, or None.
+
+    ``anchor_result["selected_index"]`` numbers the tracks of
+    ``ctx.analysis_results``, which holds every source WAV. The coherence
+    stages index ``verify_results``, which holds every WAV in ``mastered/``.
+    That list is longer when ``mastered/`` keeps a file no source matches
+    (the old master of a renamed or removed track) and shorter when mastering
+    skipped a source with no measurable loudness, so the same number can name
+    a different track there or run past its end. Find the anchor there by
+    filename.
+
+    Without an analysis entry to name the anchor (a frozen signature written
+    when the album had more tracks, say), the number is used as given, as
+    long as it fits ``results``.
+    """
+    anchor_idx = ctx.anchor_result.get("selected_index")
+    if not isinstance(anchor_idx, int) or anchor_idx < 1:
+        return None
+    anchor_name: str | None = None
+    if anchor_idx <= len(ctx.analysis_results):
+        anchor_name = ctx.analysis_results[anchor_idx - 1].get("filename")
+    if not anchor_name:
+        return anchor_idx if anchor_idx <= len(results) else None
+    for pos, result in enumerate(results, start=1):
+        if result.get("filename") == anchor_name:
+            return pos
+    return None
+
+
 async def _stage_coherence_check(ctx: MasterAlbumCtx) -> str | None:
     """Stage 5.1: Classify tracks against coherence tolerance bands (#290 step 5).
 
-    Reads ctx: anchor_result, verify_results, preset_dict
+    Reads ctx: anchor_result, verify_results, effective_preset
     Sets ctx:  coherence_classifications, stages["coherence_check"]
     Returns: None always (outliers are warnings, not pipeline halts).
     """
@@ -1317,10 +1430,26 @@ async def _stage_coherence_check(ctx: MasterAlbumCtx) -> str | None:
         }
         return None
 
-    tolerances = _coherence_load_tolerances(ctx.preset_dict)
-    deltas = compute_anchor_deltas(ctx.verify_results, anchor_index_1based=anchor_idx)
+    # The anchor's place among the mastered tracks, which can differ from
+    # its number among the sources (see _anchor_position).
+    anchor_pos = _anchor_position(ctx, ctx.verify_results)
+    if anchor_pos is None:
+        ctx.stages["coherence_check"] = {
+            "status": "warn",
+            "reason": "anchor_not_mastered",
+            "outlier_count": 0,
+            "correctable_count": 0,
+            "anchor_index": anchor_idx,
+        }
+        return None
+
+    # effective_preset, not preset_dict: a frozen re-master puts the
+    # signature's stored tolerances there, and they must be the ones used
+    # (#681). In a fresh run it holds the genre preset's own values.
+    tolerances = _coherence_load_tolerances(_tolerance_source(ctx))
+    deltas = compute_anchor_deltas(ctx.verify_results, anchor_index_1based=anchor_pos)
     classifications = _coherence_classify(
-        deltas, ctx.verify_results, tolerances, anchor_index_1based=anchor_idx
+        deltas, ctx.verify_results, tolerances, anchor_index_1based=anchor_pos
     )
     ctx.coherence_classifications = classifications
 
@@ -1335,7 +1464,7 @@ async def _stage_coherence_check(ctx: MasterAlbumCtx) -> str | None:
     from tools.mastering.coherence import build_correction_plan
     plan = build_correction_plan(
         classifications, ctx.verify_results,
-        anchor_index_1based=anchor_idx,
+        anchor_index_1based=anchor_pos,
         max_tilt_db=tolerances["coherence_tilt_max_db"],
     )
     correctable_count = sum(1 for c in plan["corrections"] if c["correctable"])
@@ -1380,10 +1509,25 @@ async def _stage_coherence_correct(ctx: MasterAlbumCtx) -> str | None:
         }
         return None
 
+    # Index the mastered tracks by the anchor's place among them, not by its
+    # number among the sources (see _anchor_position).
+    anchor_pos = _anchor_position(ctx, ctx.verify_results)
+    if anchor_pos is None:
+        ctx.stages["coherence_correct"] = {
+            "status": "warn",
+            "reason": "anchor_not_mastered",
+            "iterations": 0,
+            "corrections": [],
+        }
+        return None
+
     assert ctx.source_dir is not None
     assert ctx.output_dir is not None
 
-    tolerances = _coherence_load_tolerances(ctx.preset_dict)
+    # effective_preset, not preset_dict: a frozen re-master puts the
+    # signature's stored tolerances there, and they must be the ones used
+    # (#681). In a fresh run it holds the genre preset's own values.
+    tolerances = _coherence_load_tolerances(_tolerance_source(ctx))
     all_corrections: list[dict[str, Any]] = []
     iterations_run = 0
 
@@ -1394,14 +1538,14 @@ async def _stage_coherence_correct(ctx: MasterAlbumCtx) -> str | None:
     # the album median (anchor-based here) be captured once and held constant
     # across inner iterations to prevent correction feedback loops.
     frozen_anchor_lufs = float(
-        current_verify[anchor_idx - 1].get("lufs", 0.0)
-    ) if 1 <= anchor_idx <= len(current_verify) else 0.0
+        current_verify[anchor_pos - 1].get("lufs", 0.0)
+    ) if 1 <= anchor_pos <= len(current_verify) else 0.0
 
     prev_plan_signature: tuple[tuple[str, float, float], ...] | None = None
 
     for _iter in range(_COHERENCE_MAX_ITERATIONS):
         plan = _coherence_build_plan(
-            classifications, current_verify, anchor_idx,
+            classifications, current_verify, anchor_pos,
             max_tilt_db=tolerances["coherence_tilt_max_db"],
         )
         correctable = [c for c in plan["corrections"] if c["correctable"]]
@@ -1497,6 +1641,7 @@ async def _stage_coherence_correct(ctx: MasterAlbumCtx) -> str | None:
                         tilt_db=tilt_db,
                         # Re-mastered from the source: keep the track's fade.
                         fade_out=_helpers._track_fade_out(ctx.album_slug, filename),
+                        archival_path=_archival_float_path(ctx, filename),
                     ),
                 )
                 all_corrections.append({
@@ -1530,10 +1675,10 @@ async def _stage_coherence_correct(ctx: MasterAlbumCtx) -> str | None:
 
         # Re-classify with fresh analysis
         fresh_deltas = compute_anchor_deltas(
-            fresh_results, anchor_index_1based=anchor_idx
+            fresh_results, anchor_index_1based=anchor_pos
         )
         classifications = _coherence_classify(
-            fresh_deltas, fresh_results, tolerances, anchor_index_1based=anchor_idx
+            fresh_deltas, fresh_results, tolerances, anchor_index_1based=anchor_pos
         )
         current_verify = fresh_results
 
@@ -1645,6 +1790,19 @@ async def _stage_ceiling_guard(
                         output_bits=output_bits,
                     ),
                 )
+                # The archival float follows the delivered master (#681).
+                arch_float = _archival_float_path(ctx, row["filename"])
+                if arch_float is not None and arch_float.is_file():
+                    await ctx.loop.run_in_executor(
+                        None,
+                        functools.partial(
+                            apply_pull_down_db,
+                            arch_float,
+                            gain_db=row["pull_down_db"],
+                            output_bits=output_bits,
+                            subtype="FLOAT",
+                        ),
+                    )
                 pulled_files.append(row["filename"])
             except CeilingGuardError as exc:
                 pull_down_errors.append(f"{row['filename']}: {exc}")
@@ -1863,10 +2021,12 @@ async def _stage_post_qc(ctx: MasterAlbumCtx) -> str | None:
     # when the genre reaches the click detector.
     qc_genre = ctx.genre or None
 
+    # The true-peak check measures against the ceiling this run mastered to
+    # (config, preset, argument or frozen signature), not a fixed -1.0 (#683).
     post_qc_results = []
     for wav in ctx.mastered_files:
         result = await ctx.loop.run_in_executor(
-            None, qc_track, str(wav), None, qc_genre,
+            None, qc_track, str(wav), None, qc_genre, ctx.effective_ceiling,
         )
         post_qc_results.append(result)
 
@@ -1923,20 +2083,20 @@ async def _stage_post_qc(ctx: MasterAlbumCtx) -> str | None:
         })
 
     # ── LRA floor check (spec step 10: LRA ≥ genre floor, hard fail) ─────────
-    lra_floor = (
-        ctx.preset_dict.get("coherence_lra_floor_lu")
-        if ctx.preset_dict is not None
-        else None
-    )
+    # The floor comes from effective_preset so a frozen re-master holds the
+    # signature's stored floor (#681); a genreless fresh run has none.
+    lra_floor = _tolerance_source(ctx).get("coherence_lra_floor_lu")
     if lra_floor is not None:
+        # The EBU R128 loudness range, not short_term_range (#681): a track
+        # too short or too quiet to measure one is not held to the floor.
         lra_violations = [
             {
                 "filename": r["filename"],
-                "lra_lu": r.get("short_term_range", float("inf")),
+                "lra_lu": r["lra"],
                 "floor_lu": lra_floor,
             }
             for r in ctx.verify_results
-            if r.get("short_term_range", float("inf")) < lra_floor
+            if r.get("lra") is not None and r["lra"] < lra_floor
         ]
         if lra_violations:
             ctx.stages["post_qc"] = {
@@ -2025,12 +2185,20 @@ async def _stage_post_qc(ctx: MasterAlbumCtx) -> str | None:
 async def _stage_archival(ctx: MasterAlbumCtx) -> str | None:
     """Stage 6.5: Write 32-bit float archival copies (opt-in).
 
+    The archival copy is the pre-downconvert master: the float each writer
+    staged in ``.archival_staging/`` before dither and the bit-depth
+    conversion (#681), not the delivered 16/24-bit file re-saved as float.
+    A track with no staged float (it should not happen) falls back to a
+    float copy of the delivered file, listed under ``from_delivered``.
+
     Reads ctx: audio_dir, mastered_files, targets
     Sets ctx:  (nothing — archival output is filesystem-side only)
     Returns: None always (archival errors go to warnings, never halt).
     """
     if not ctx.targets.get("archival_enabled"):
         return None
+
+    import shutil as _shutil
 
     import soundfile as _sf_archival
 
@@ -2039,27 +2207,46 @@ async def _stage_archival(ctx: MasterAlbumCtx) -> str | None:
     assert ctx.audio_dir is not None
     archival_dir = ctx.audio_dir / "archival"
     archival_dir.mkdir(exist_ok=True)
+    staging_dir = ctx.audio_dir / _ARCHIVAL_STAGING_DIRNAME
     mastered_names = {p.name for p in ctx.mastered_files}
-    pruned = prune_archival_orphans(archival_dir, mastered_names)
+    # A stray (a WAV in mastered/ that matches no track) is reported, never
+    # deleted, so its archived float copy stays too until the user moves it.
+    strays = set(ctx.stages.get("mastering", {}).get("stray_wavs") or [])
+    pruned = prune_archival_orphans(archival_dir, mastered_names | strays)
 
     archived = 0
+    from_delivered: list[str] = []
     archive_errors: list[str] = []
     for mastered_path in ctx.mastered_files:
         arch_path = archival_dir / mastered_path.name
+        staged = staging_dir / mastered_path.name
         try:
-            data, rate = _sf_archival.read(str(mastered_path), dtype="float32")
-            _sf_archival.write(str(arch_path), data, rate, subtype="FLOAT")
+            if staged.is_file():
+                os.replace(str(staged), str(arch_path))
+            else:
+                data, rate = _sf_archival.read(str(mastered_path), dtype="float32")
+                _sf_archival.write(str(arch_path), data, rate, subtype="FLOAT")
+                from_delivered.append(mastered_path.name)
             archived += 1
         except Exception as exc:
             archive_errors.append(f"{mastered_path.name}: {exc}")
 
+    if staging_dir.exists():
+        _shutil.rmtree(staging_dir, ignore_errors=True)
+
     ctx.stages["archival"] = {
-        "status": "pass" if not archive_errors else "warn",
+        "status": "pass" if not (archive_errors or from_delivered) else "warn",
         "count": archived,
         "pruned": pruned or None,
         "output_dir": str(archival_dir),
         "errors": archive_errors or None,
+        "from_delivered": from_delivered or None,
     }
+    if from_delivered:
+        ctx.warnings.append(
+            f"Archival: no pre-dither master for {', '.join(from_delivered)}; "
+            f"archived a float copy of the delivered file instead."
+        )
     return None
 
 
@@ -2177,11 +2364,17 @@ def _playlist_entries(slug: str, wavs: list[Path]) -> tuple[str, list[PlaylistEn
     return str(album.get("title") or slug), entries
 
 
-def write_album_playlist(album_slug: str, audio_dir: Path) -> dict[str, Any]:
+def write_album_playlist(
+    album_slug: str, audio_dir: Path, wavs: list[Path] | None = None,
+) -> dict[str, Any]:
     """Write ``<album slug>.m3u8`` beside ``mastered/``, listing its WAVs in order.
 
-    Rebuilt from what is in ``mastered/`` on every call, so each tool that
-    writes there keeps it current. Titles come from the state cache and the
+    Rebuilt on every call, so each tool that writes ``mastered/`` keeps it
+    current. ``wavs`` is the album's tracks when the caller knows them:
+    master_album passes the masters of this run's sources, so a stray left
+    in ``mastered/`` is not played as a track, matching LAYOUT.md and the
+    metadata (#668). Without it, the playlist lists every WAV in
+    ``mastered/``. Titles come from the state cache and the
     artist from config, as for the metadata stage; a track without a title
     shows its file name. With nothing mastered, a playlist left from earlier
     is removed. Never raises: a failure comes back as ``status: "warn"``.
@@ -2189,7 +2382,10 @@ def write_album_playlist(album_slug: str, audio_dir: Path) -> dict[str, Any]:
     slug = _normalize_slug(album_slug)
     target = playlist_path(audio_dir, slug)
     try:
-        wavs = _mastered_wavs(audio_dir / "mastered")
+        if wavs is None:
+            wavs = _mastered_wavs(audio_dir / "mastered")
+        else:
+            wavs = sorted(w for w in wavs if not {"\n", "\r"} & set(w.name))
         if not wavs:
             target.unlink(missing_ok=True)
             return {"status": "skipped", "reason": "no mastered WAVs", "path": None}
@@ -2203,25 +2399,61 @@ def write_album_playlist(album_slug: str, audio_dir: Path) -> dict[str, Any]:
 async def _stage_playlist(ctx: MasterAlbumCtx) -> str | None:
     """Stage 6.8: Write the album's listening playlist beside ``mastered/``.
 
-    Reads ctx: album_slug, audio_dir, warnings
+    Reads ctx: album_slug, audio_dir, mastered_files, warnings
     Sets ctx:  stages["playlist"]
     Returns: None always (a failure is a warning, never a halt).
     """
     assert ctx.audio_dir is not None
-    stage = write_album_playlist(ctx.album_slug, ctx.audio_dir)
+    stage = write_album_playlist(ctx.album_slug, ctx.audio_dir, ctx.mastered_files)
     if stage["status"] == "warn":
         ctx.warnings.append(f"Playlist: {stage['error']}")
     ctx.stages["playlist"] = stage
     return None
 
 
-async def _stage_status_update(ctx: MasterAlbumCtx) -> str | None:
-    """Stage 7: Transition Generated → Final tracks; advance album to Complete.
+_RE_LEADING_TRACK_NUMBER = re.compile(r"^(\d+)")
 
-    Reads ctx: album_slug, warnings
-    Sets ctx:  (appends to ctx.warnings on errors; no new ctx fields)
+
+def _master_of_track(mastered_files: list[Path], track_slug: str) -> Path | None:
+    """The master this run made for *track_slug*, or None.
+
+    Same rule as ``find_track_audio``: ``<slug>.wav`` first, then the one
+    master whose leading number is the track's (two such masters: None).
+    """
+    for wav in mastered_files:
+        if wav.stem == track_slug:
+            return wav
+    number = _RE_LEADING_TRACK_NUMBER.match(track_slug)
+    if not number:
+        return None
+    wanted = int(number.group(1))
+    numbered = [
+        wav for wav in mastered_files
+        if (match := _RE_LEADING_TRACK_NUMBER.match(wav.stem)) and int(match.group(1)) == wanted
+    ]
+    return numbered[0] if len(numbered) == 1 else None
+
+
+async def _stage_status_update(ctx: MasterAlbumCtx) -> str | None:
+    """Stage 7: Mark mastered keepers Final; advance the album to Complete.
+
+    A track goes Final only when this run mastered it (its WAV is in
+    ``ctx.mastered_files``) AND its Generation Log has a take the user marked
+    ✓ (plugin-rules: "Only Final with a ✓ keeper"; #679 item 2). Every other
+    track keeps its status and is listed in ``tracks_left`` with the reason
+    (no master / no ✓ keeper), which makes the stage ``warn``. Final and
+    Released tracks are left as they are (#335: never demote on a re-master).
+    The album goes Complete only when every track ends up Final.
+
+    This replaces #335's "every non-terminal track becomes Final", which
+    marked tracks Final without a master or a keeper the user picked.
+
+    Reads ctx: album_slug, audio_dir, mastered_files, warnings
+    Sets ctx:  stages["status_update"] (appends to ctx.warnings on errors)
     Returns: None always (status errors go to warnings, never halt).
     """
+    # lazy: handlers.generation imports handlers.gates
+    from handlers.generation import parse_generation_log
     from tools.state.indexer import write_state
     from tools.state.parsers import parse_track_file
 
@@ -2232,6 +2464,7 @@ async def _stage_status_update(ctx: MasterAlbumCtx) -> str | None:
 
     tracks_updated = 0
     status_errors: list[str] = []
+    tracks_left: list[dict[str, str]] = []
     album_status: str | None = None
 
     if album_data:
@@ -2247,19 +2480,20 @@ async def _stage_status_update(ctx: MasterAlbumCtx) -> str | None:
                 ALBUM_RELEASED.lower(),
             ):
                 continue
-            # Everything else gets promoted to Final — the mastered WAV is
-            # real, so the status should follow. Previously this stage
-            # only accepted `Generated` as input and appended a "skipped"
-            # error for any other status (Not Started / Sources Pending /
-            # Sources Verified / In Progress), silently no-op'ing the
-            # entire stage on any album whose tracks weren't pinned at
-            # exactly `Generated` (#335).
+            if _master_of_track(ctx.mastered_files, track_slug) is None:
+                tracks_left.append({
+                    "track": track_slug, "status": current_track_status,
+                    "reason": "no master from this run",
+                })
+                continue
             track_path_str = track_info.get("path", "")
             if not track_path_str:
-                # Cache-staleness: a track entry with no path has no disk
-                # file to update. Skip silently — the mastering pipeline
-                # only touched WAVs discovered from the audio dir, so
-                # missing path here is a bookkeeping gap, not a failure.
+                # Cache-staleness: no track file to read the keeper from or
+                # to update — the status stays as it is.
+                tracks_left.append({
+                    "track": track_slug, "status": current_track_status,
+                    "reason": "no track file in the state cache",
+                })
                 continue
             track_path = Path(track_path_str)
             if not track_path.exists():
@@ -2267,6 +2501,12 @@ async def _stage_status_update(ctx: MasterAlbumCtx) -> str | None:
                 continue
             try:
                 text = track_path.read_text(encoding="utf-8")
+                if not any(take["approved"] for take in parse_generation_log(text)):
+                    tracks_left.append({
+                        "track": track_slug, "status": current_track_status,
+                        "reason": "no ✓ keeper in the Generation Log",
+                    })
+                    continue
                 pattern = re.compile(
                     r'^(\|\s*\*\*Status\*\*\s*\|)\s*.*?\s*\|',
                     re.MULTILINE,
@@ -2339,6 +2579,14 @@ async def _stage_status_update(ctx: MasterAlbumCtx) -> str | None:
 
     for err_msg in status_errors:
         ctx.warnings.append(f"Status update: {err_msg}")
+    if tracks_left:
+        ctx.warnings.append(
+            f"Status update: {len(tracks_left)} track(s) not marked Final — "
+            + "; ".join(f"{t['track']} ({t['reason']})" for t in tracks_left[:5])
+            + (" …" if len(tracks_left) > 5 else "")
+            + ". Mark the keeper ✓ (listen/generate) or master the track, then set "
+              "Final with update_track_field."
+        )
 
     # Classify the stage outcome. Prior to #335 this was hardcoded to
     # "pass" even when tracks_updated == 0 AND errors existed, which
@@ -2346,16 +2594,20 @@ async def _stage_status_update(ctx: MasterAlbumCtx) -> str | None:
     #   - no errors                 → "pass" (clean run or idempotent no-op)
     #   - errors + some updates     → "partial" (something worked, some didn't)
     #   - errors + zero updates     → "skipped" (nothing landed, surface it)
-    if not status_errors:
-        stage_outcome = "pass"
-    elif tracks_updated > 0:
+    #   - no errors, tracks left     → "warn" (#679 item 2: they need a keeper or a master)
+    if status_errors and tracks_updated > 0:
         stage_outcome = "partial"
-    else:
+    elif status_errors:
         stage_outcome = "skipped"
+    elif tracks_left:
+        stage_outcome = "warn"
+    else:
+        stage_outcome = "pass"
 
     ctx.stages["status_update"] = {
         "status": stage_outcome,
         "tracks_updated": tracks_updated,
+        "tracks_left": tracks_left,
         "album_status": album_status,
         "errors": status_errors if status_errors else None,
     }
@@ -2436,7 +2688,7 @@ async def _stage_signature_persist(ctx: MasterAlbumCtx) -> str | None:
             anchor_track_sig = {
                 k: row.get(k)
                 for k in ("stl_95", "low_rms", "vocal_rms",
-                          "short_term_range", "lufs", "peak_db")
+                          "lra", "short_term_range", "lufs", "peak_db")
             }
 
         if ctx.frozen_signature is not None:

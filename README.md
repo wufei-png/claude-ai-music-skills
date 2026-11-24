@@ -23,7 +23,7 @@ macOS is my daily driver, so it's where this plugin gets the most real-world use
 
 ## Example Workflow
 
-```
+```text
 You:    "Let's make an album about the 2016 Bangladesh Bank heist"
 Claude: Creates album structure, runs 7-phase concept planning
 
@@ -46,7 +46,7 @@ Claude: Imports stems from Suno, polishes per-stem
 Concept to released album, from the terminal. Connect Suno's own MCP server and generation happens there too — and you still listen to every take before it's approved.
 
 > [!WARNING]
-> [Suno's MCP server](https://suno.com/mcp) is an invite-only beta: you can connect it only once Suno has invited you. Without it, the rest of the plugin works the same, and you paste the lyrics and style prompt into suno.com as before. Suno is also updating the server constantly, so the skills that use it (`generate`, `listen`, `check-take`, `edit-take`, `extend-take`, `sound-effects`, `suno-voice` and `import-audio --from-suno`) may break without warning until Suno officially releases it.
+> [Suno's MCP server](https://suno.com/mcp) is available on every Suno plan, and songs made through it use your plan's credits. Visuals (album art, lyric videos, promo clips and music videos) need a paid Suno plan, and some AI apps only let you add a connector on one of their own paid plans. Without the server, the rest of the plugin works the same, and you paste the lyrics and style prompt into suno.com as before. Suno still adds tools and changes their arguments, so if one of the skills that use it (`generate`, `listen`, `check-take`, `edit-take`, `extend-take`, `sound-effects`, `suno-voice`, `lyric-video`, `music-video` and `import-audio --from-suno`) misbehaves after a Suno update, [open an issue](https://github.com/bitwize-music-studio/claude-ai-music-skills/issues).
 
 ---
 
@@ -63,23 +63,35 @@ Then run `/bitwize-music:setup` to detect your environment and install dependenc
 
 ### OpenAI Codex (experimental)
 
-Codex can install the plugin from this repository too:
+Install the plugin from GitHub.
 
 ```bash
 codex plugin marketplace add bitwize-music-studio/claude-ai-music-skills
 codex plugin add bitwize-music@bitwize-music
 ```
 
-All 61 skills load, and the MCP server runs from the same `~/.bitwize-music/venv` that Claude Code uses, on macOS, Linux and Windows. The `setup` skill still assumes Claude Code, so if you haven't set the plugin up there, create the venv by hand (Python 3.11+):
+To use a local checkout, register its path.
 
 ```bash
-python3 -m venv ~/.bitwize-music/venv
-~/.bitwize-music/venv/bin/python -m pip install -r https://raw.githubusercontent.com/bitwize-music-studio/claude-ai-music-skills/main/requirements.txt
+codex plugin marketplace add /absolute/path/to/this/checkout
+codex plugin add bitwize-music@bitwize-music
 ```
 
-On Windows (cmd), run `python -m venv %USERPROFILE%\.bitwize-music\venv`, then `%USERPROFILE%\.bitwize-music\venv\Scripts\python.exe -m pip install -r` with the same URL.
+In a new Codex session, run `$bitwize-music:setup`, then
+`$bitwize-music:configure`. You can also select the skills in the skill picker.
+Setup reads the requirements from the installed plugin, so you can run it from
+your music workspace. Codex and Claude Code share the configuration and the
+Python 3.11+ venv at `~/.bitwize-music/venv`.
 
-So far Codex support covers discovery and the MCP tools, and many skills still assume Claude Code. [#548](https://github.com/bitwize-music-studio/claude-ai-music-skills/issues/548) tracks the rest.
+Run `$bitwize-music:session-start` at the start of a music session. Use
+`$bitwize-music:resume my-album` to resume an album by name, or omit the name
+to use saved session context. Both skills load the installed
+[plugin rules](reference/plugin-rules.md) and your configured overrides.
+
+See the [shared runtime rules](reference/runtime-compatibility.md) for skill
+names and plugin paths.
+[#548](https://github.com/bitwize-music-studio/claude-ai-music-skills/issues/548)
+tracks compatibility for other workflows.
 
 ---
 
@@ -87,7 +99,7 @@ So far Codex support covers discovery and the MCP tools, and many skills still a
 
 This is where the engineering lives. The plugin is a case study in how far you can push Claude Code's plugin system.
 
-### Skill System (61 Skills)
+### Skill System (63 Skills)
 
 Each skill is a self-contained markdown file with a YAML frontmatter that declares its model, description, and when it should activate. Skills range from simple clipboard operations to multi-step creative workflows. Claude routes to skills automatically based on context, or you invoke them directly with `/bitwize-music:<name>`.
 
@@ -149,8 +161,8 @@ Coverage is measured on all three OSes and gated on the **combined** total, not 
 
 ## Project Structure
 
-```
-skills/              60 skill definitions (markdown + YAML frontmatter)
+```text
+skills/              63 skill definitions (markdown + YAML frontmatter)
 servers/             MCP server (Python, 80+ tools)
 tools/               Audio mastering, promo videos, sheet music, cloud uploads
 reference/           46+ docs — Suno guides, mastering workflows, genre references
@@ -166,7 +178,7 @@ config/              Example config and setup docs
 
 | Topic | Location |
 |-------|----------|
-| All 61 skills | [docs/skills.md](docs/skills.md) |
+| All 63 skills | [docs/skills.md](docs/skills.md) |
 | Configuration | [docs/configuration.md](docs/configuration.md) |
 | Troubleshooting | [docs/troubleshooting.md](docs/troubleshooting.md) |
 | Changelog | [CHANGELOG.md](CHANGELOG.md) |
@@ -192,6 +204,7 @@ config/              Example config and setup docs
 <a href="https://github.com/medinabestari"><img src="https://images.weserv.nl/?url=github.com/medinabestari.png&h=60&w=60&fit=cover&mask=circle" width="60" height="60" alt="@medinabestari"></a>
 <a href="https://github.com/cbrahms"><img src="https://images.weserv.nl/?url=github.com/cbrahms.png&h=60&w=60&fit=cover&mask=circle" width="60" height="60" alt="@cbrahms"></a>
 <a href="https://github.com/wufei-png"><img src="https://images.weserv.nl/?url=github.com/wufei-png.png&h=60&w=60&fit=cover&mask=circle" width="60" height="60" alt="@wufei-png"></a>
+<a href="https://github.com/divya0795"><img src="https://images.weserv.nl/?url=github.com/divya0795.png&h=60&w=60&fit=cover&mask=circle" width="60" height="60" alt="@divya0795"></a>
 
 If you make something with this, I'd genuinely love to hear it — [@bitwizemusic](https://x.com/bitwizemusic) on X, [join the Discord](https://discord.gg/dMURByGF), or [open a discussion](https://github.com/bitwize-music-studio/claude-ai-music-skills/discussions).
 

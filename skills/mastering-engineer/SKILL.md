@@ -233,6 +233,8 @@ master_album(album_slug, genre="country", cut_highmid=-2.0)
 
 This executes: analyze → pre-QC → master → verify → post-QC → update statuses. Stops on any failure and returns per-stage results. Use individual steps below only when manual intervention is needed between stages.
 
+**Statuses:** the last stage marks a track `Final` only when this run mastered it **and** its Generation Log has a take the user marked ✓. Tracks without a master or without a ✓ keeper keep their status and are listed in `stages.status_update.tracks_left` with the reason (the stage reports `warn`); tell the user which ones and why, and never mark a keeper for them. The album goes `Complete` only when every track is `Final`.
+
 **Note:** `master_album` applies one genre to all tracks. If Step 1.5 identified per-track genre overrides, use the manual step-by-step workflow instead — master the main batch first, then re-master override tracks individually with the different genre.
 
 ### Step 3: Choose Settings
@@ -288,6 +290,11 @@ If a track has excessive dynamic range and won't reach target LUFS:
 ```
 fix_dynamic_track(album_slug, track_filename="05-problem-track.wav")
 ```
+
+The fixed track goes into `mastered/` like every other master: the genre's
+loudness target and true-peak ceiling (the album's genre by default, or pass
+`genre=`), at `mastering.delivery_bit_depth` / `delivery_sample_rate`.
+`master_with_reference` writes the same delivery format and ceiling.
 
 ### Step 6.5: Real-listener QC artifacts (`mastering_samples/`)
 

@@ -38,6 +38,10 @@ from handlers._shared import (
 
 logger = logging.getLogger(__name__)
 
+# templates/track.md's undecided frontmatter flag: ``explicit:`` with no value
+# (or the ``explicit: false`` the template shipped before #683).
+_RE_TEMPLATE_EXPLICIT_FM = re.compile(r"^explicit:[ \t]*(?:false)?[ \t]*$", re.MULTILINE)
+
 
 # ---------------------------------------------------------------------------
 # Status transition rules — single source of truth for validation logic.
@@ -132,7 +136,7 @@ def _check_album_track_consistency(album: dict[str, Any], new_status: str) -> st
 
     Rules:
     - Album "In Progress" -> at least 1 track past "Not Started"
-    - Album "Complete" -> ALL tracks at Generated or Final
+    - Album "Complete" -> ALL tracks Final (status-tracking.md; #679 item 4)
     - Album "Released" -> ALL tracks at Final
     - Levels 0-2 (Concept/Research/Sources Verified) -> no track requirements
     - Empty albums (no tracks) -> always pass
@@ -158,14 +162,15 @@ def _check_album_track_consistency(album: dict[str, Any], new_status: str) -> st
             )
 
     elif canonical == ALBUM_COMPLETE:
-        below = [
+        non_final = [
             slug for slug, t in tracks.items()
-            if _TRACK_STATUS_LEVEL.get(t.get("status", TRACK_NOT_STARTED), 0) < _TRACK_STATUS_LEVEL[TRACK_GENERATED]
+            if t.get("status", TRACK_NOT_STARTED) != TRACK_FINAL
         ]
-        if below:
+        if non_final:
             return (
-                f"Cannot set album to 'Complete' — {len(below)} track(s) below 'Generated': "
-                f"{', '.join(sorted(below)[:5])}. All tracks must be Generated or Final."
+                f"Cannot set album to 'Complete' — {len(non_final)} track(s) not Final: "
+                f"{', '.join(sorted(non_final)[:5])}. An album is Complete when all "
+                f"its tracks are Final."
             )
 
     elif canonical == ALBUM_RELEASED:
@@ -221,7 +226,7 @@ async def update_album_status(album_slug: str, status: str, force: bool = False)
         JSON with update result or error
     """
     from tools.state.indexer import write_state
-    from tools.state.parsers import parse_album_readme
+    from tools.state.parsers import parse_album_readme, sources_verified_cleared
 
     # Validate status
     if status.lower().strip() not in _VALID_ALBUM_STATUSES:
@@ -257,17 +262,18 @@ async def update_album_status(album_slug: str, status: str, force: bool = False)
                 current_status.lower().strip(), current_status)
             if canonical_current == ALBUM_CONCEPT and canonical_status == ALBUM_IN_PROGRESS:
                 album_path = album.get("path", "")
-                if album_path:
-                    sources_path = Path(album_path) / "SOURCES.md"
-                    if sources_path.exists():
-                        return _safe_json({
-                            "error": "Cannot skip to 'In Progress' — this album has SOURCES.md "
-                                     "(documentary). Transition through 'Research Complete' → "
-                                     "'Sources Verified' → 'In Progress' instead, or use "
-                                     "force=True to override. To disable this check, set "
-                                     "generation.require_source_path_for_documentary: false "
-                                     "in config.",
-                        })
+                # Documentary = the album keeps research (SOURCES.md, RESEARCH.md,
+                # a research/ folder), the same test create_track uses (#679 item 6).
+                if album_path and _album_keeps_research(Path(album_path)):
+                    return _safe_json({
+                        "error": "Cannot skip to 'In Progress' — this album keeps research "
+                                 "(SOURCES.md / RESEARCH.md: documentary). Transition through "
+                                 "'Research Complete' → "
+                                 "'Sources Verified' → 'In Progress' instead, or use "
+                                 "force=True to override. To disable this check, set "
+                                 "generation.require_source_path_for_documentary: false "
+                                 "in config.",
+                    })
 
     # Album/track consistency gate: album status must not exceed track statuses
     if not force:
@@ -279,10 +285,12 @@ async def update_album_status(album_slug: str, status: str, force: bool = False)
     # can advance to Sources Verified
     if status.lower().strip() == ALBUM_SOURCES_VERIFIED.lower() and not force:
         tracks = album.get("tracks", {})
+        # Each track's own Sources Verified field decides, not its status: a
+        # verified track still at status Sources Pending counts as verified, an
+        # In Progress track whose sources are pending does not (#679 item 6).
         unverified = [
             s for s, t in tracks.items()
-            if t.get("status", TRACK_NOT_STARTED) in
-            {TRACK_NOT_STARTED, TRACK_SOURCES_PENDING}
+            if not sources_verified_cleared(t.get("sources_verified", "N/A"))
         ]
         if unverified:
             return _safe_json({
@@ -304,6 +312,23 @@ async def update_album_status(album_slug: str, status: str, force: bool = False)
         if non_final:
             release_issues.append(
                 f"{len(non_final)} track(s) not Final: {', '.join(sorted(non_final)[:5])}"
+            )
+
+        # Check 1b: release_date set in the README frontmatter (status-tracking.md:
+        # "Released — release_date set in frontmatter"; #679 item 7). The README
+        # is read fresh: the date may have been set since the last rebuild.
+        release_date = album.get("release_date")
+        if not release_date and album.get("path"):
+            readme_for_date = Path(album["path"]) / "README.md"
+            if readme_for_date.is_file():
+                try:
+                    release_date = parse_album_readme(readme_for_date).get("release_date")
+                except Exception as e:
+                    logger.warning("Cannot read release_date from %s: %s", readme_for_date, e)
+        if not release_date or not str(release_date).strip():
+            release_issues.append(
+                "No release_date in the album README frontmatter — set it with "
+                "update_album_field(album_slug, \"release-date\", \"YYYY-MM-DD\") first"
             )
 
         # Check 2: Audio files exist
@@ -597,18 +622,18 @@ async def create_track(
     content = content.replace("[Track's role in the album narrative]", "—")
 
     # Fill frontmatter placeholders
-    album_explicit = bool(album.get("explicit", False))
     content = content.replace("track_number: 0", f"track_number: {number}")
-    content = content.replace(
-        "explicit: false",
-        f"explicit: {'true' if album_explicit else 'false'}",
-    )
-    # The Explicit row says what the frontmatter two lines above it already
-    # does, instead of staying a "Yes / No" placeholder beside a set value.
-    content = content.replace(
-        "| **Explicit** | Yes / No |",
-        f"| **Explicit** | {'Yes' if album_explicit else 'No'} |",
-    )
+    # Explicit is decided per track, once its lyrics are checked: a fresh
+    # track keeps the template's blank flag and "Yes / No" row, so the
+    # pre-generation gate blocks until someone decides (#370, #683). The one
+    # thing carried over is a "Yes" from an album the user marked explicit —
+    # the safe direction; an album's false is the album template's default,
+    # not a decision about this track.
+    if album.get("explicit") is True:
+        content = _RE_TEMPLATE_EXPLICIT_FM.sub("explicit: true", content, count=1)
+        content = content.replace(
+            "| **Explicit** | Yes / No |", "| **Explicit** | Yes |",
+        )
 
     # A track with no source material has nothing for a human to verify. The
     # template's "❌ Pending" stays wherever there may be sources: on a
@@ -645,20 +670,23 @@ async def create_track(
     # Refresh state so subsequent tools (get_track, update_track_field,
     # list_tracks, ...) can find the new track without a manual rebuild_state,
     # mirroring create_album_structure. The file is already written, so a
-    # rebuild failure is non-fatal — log it but still report the create as
-    # successful (same pattern as create_idea/promote_idea).
-    try:
-        _shared.cache.rebuild()
-    except Exception as e:
-        logger.warning("Track created but cache rebuild failed: %s", e)
-
-    return _safe_json({
+    # rebuild failure does not undo the create: it is reported in "warnings".
+    result: dict[str, Any] = {
         "created": True,
         "path": str(track_path),
         "album_slug": normalized,
         "track_slug": f"{padded}-{title_slug}",
         "filename": filename,
-    })
+    }
+    # A failed rebuild — returned or raised — is reported (#679 item 9).
+    _rebuilt, rebuild_error = _shared.rebuild_cache()
+    result["indexed"] = rebuild_error is None
+    if rebuild_error is not None:
+        logger.warning("Track created but cache rebuild failed: %s", rebuild_error)
+        result["warnings"] = [_shared.rebuild_warning(
+            f"The track file was created at {track_path}", rebuild_error,
+        )]
+    return _safe_json(result)
 
 
 # ---------------------------------------------------------------------------

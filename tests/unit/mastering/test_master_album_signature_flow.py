@@ -145,11 +145,16 @@ def test_status_update_does_not_advance_album_when_signature_missing(
     """
     from handlers import _shared
 
-    # One Generated track so all_final would be True after status_update.
+    # One Generated track with a ✓ keeper, so all_final would be True after
+    # status_update (a track goes Final only with a master and a keeper —
+    # #679 item 2).
     _write_sine_wav(tmp_path / "01-track.wav", amplitude=0.3)
     track_md = tmp_path / "01-track.md"
     track_md.write_text(
-        "# Track 1\n\n| **Status** | Generated |\n",
+        "# Track 1\n\n| **Status** | Generated |\n\n## Generation Log\n\n"
+        "| # | Date | Model | Result | Notes | Rating |\n"
+        "|---|------|-------|--------|-------|--------|\n"
+        "| 1 | 2026-11-01 | v6 | [Listen](https://suno.com/song/x) | keeper | ✓ |\n",
         encoding="utf-8",
     )
     readme = tmp_path / "README.md"
@@ -320,10 +325,10 @@ def test_frozen_mode_preserves_original_anchor_block(tmp_path: Path, monkeypatch
             "output_bits": 24, "output_sample_rate": 96000,
         },
         "tolerances": {
-            "coherence_stl_95_lu": 0.75,   # non-default: default is 1.0
-            "coherence_lra_floor_lu": 5.0, # non-default: default is 6.0
+            "coherence_stl_95_lu": 0.75,   # non-default: default is 0.5
+            "coherence_lra_floor_lu": 5.0, # non-default: default is 1.0
             "coherence_low_rms_db": 1.8,   # non-default: default is 2.0
-            "coherence_vocal_rms_db": 1.2, # non-default: default is 1.5
+            "coherence_vocal_rms_db": 1.2, # non-default: default is 2.0
         },
         "pipeline": {},
     }, plugin_version="0.91.0")

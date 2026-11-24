@@ -52,13 +52,13 @@ Verify it includes commented examples for:
 Verify inline comments use "Examples:" or "Example:" format
 
 ### TEST: config/README.md exists and documents all settings
-1. Read config/README.md
-2. Verify it documents each setting from config.example.yaml
-3. Check Settings Reference table is complete
+1. Read `config/README.md` and `config/config.example.yaml`.
+2. Verify each user-configurable setting in the example has an entry in Settings Reference or in a settings reference it links to.
+3. Check the declared settings in the sample. Paths marked automatic and repeated examples use the corresponding documented entries.
 
 ### TEST: Config location consistently documented as ~/.bitwize-music
 Search these files for config path references:
-- CLAUDE.md
+- reference/plugin-rules.md
 - docs/configuration.md
 - config/README.md
 - skills/configure/SKILL.md
@@ -69,20 +69,22 @@ All should reference `~/.bitwize-music/config.yaml` or `~/.bitwize-music/`
 (README.md no longer documents the config path directly — it points readers to docs/configuration.md instead.)
 
 ### TEST: Config must be read before path operations (regression)
-Read CLAUDE.md "Configuration & Path Resolution" section (formerly "When to Read Config").
+Read `reference/plugin-rules.md` "## Config and paths" section (formerly CLAUDE.md "Configuration & Path Resolution"; moved in #664).
 Verify it includes:
-1. "ALWAYS read" instruction before moving/creating files
-2. "ALWAYS read" instruction before resolving paths
-3. "Never assume or remember values" instruction
+1. "Read it fresh (`get_config`) before creating or moving files"
+2. The same instruction covering paths: "or putting the artist name in a path"
+3. "never assume values"
 
 This test was added after paths were incorrectly resolved because config values were assumed instead of read.
 
 ### TEST: No references to old config files
-Search entire repo (excluding .git/) for deprecated references:
+Search maintained documentation, configuration, and code for active references to deprecated config files:
 - `config/paths.yaml`
 - `config/artist.md`
 - `paths.example.yaml`
 - `artist.example.md`
+
+Count references that direct users or code to those files. The test's search patterns, terminology detector, and historical migration notes document the old names.
 
 ---
 
@@ -185,8 +187,8 @@ done
 2. Find in README: "### Skill System (XX Skills)" heading (the old "collection of **XX specialized skills**" phrasing is gone)
 3. Must match
 
-### TEST: All skills documented in CLAUDE.md
-DROPPED — CLAUDE.md has no comprehensive skill table anymore; it lists only a curated subset of skills in "### Key Routing Rules" by design (as of this sweep, 24 of 53 skills — including 10 researcher sub-skills — aren't named there today, and that's expected: CLAUDE.md is a curated router, not a completeness list). The authoritative version of this claim is "All skills documented in help system" below, which runs `tools/validate_help_completeness.py`: it requires every skill to be referenced in skills/help/SKILL.md, and separately checks CLAUDE.md only for ghost references (a `/bitwize-music:{name}` mention pointing at a skill that no longer exists) — it does not require CLAUDE.md to reference every skill. Keeping both risks a manual-read verdict contradicting the script's verdict for the same repo state.
+### TEST: All skills documented in reference/plugin-rules.md
+DROPPED — the plugin rules (`reference/plugin-rules.md`, which replaced CLAUDE.md's routing in #664) have no comprehensive skill table; "## Workflow and routing" lists only a curated subset of skills by design, because the whole file must fit the SessionStart hook's 9,000-character limit. That's expected: it is a curated router, not a completeness list. The authoritative version of this claim is "All skills documented in help system" below, which runs `tools/validate_help_completeness.py` and requires every skill to be referenced in skills/help/SKILL.md. Ghost references in the routing (a name pointing at a skill that no longer exists) are guarded by `tests/unit/hooks/test_session_rules.py::TestRulesFile::test_every_skill_it_routes_to_exists`. Keeping a manual completeness read risks contradicting those verdicts for the same repo state.
 
 ### TEST: All skills documented in README.md
 README.md no longer has skill tables — they moved to `docs/skills.md`. Extract skill names from skills/ directory and verify each appears (as `` `skill-name` ``) in one of `docs/skills.md`'s tables (Core Production, Research System, Quality Control, Release & Distribution, Album Management, Setup & Maintenance).
@@ -280,8 +282,8 @@ These files must exist:
 - `templates/research.md`
 - `templates/sources.md`
 
-### TEST: Templates referenced in CLAUDE.md exist
-Search CLAUDE.md for `{plugin_root}/templates/` references (CLAUDE.md now references the templates directory generically rather than naming individual files).
+### TEST: Templates referenced in the plugin rules exist
+Search `reference/plugin-rules.md` for `{plugin_root}/templates/` ("New content starts from `{plugin_root}/templates/`." — it references the templates directory generically rather than naming individual files; `AGENTS.md` "## Templates" points contributors to `templates/` as well).
 Verify the templates/ directory exists and contains the required template files (album.md, track.md, artist.md, research.md, sources.md).
 
 ### TEST: IDEAS.md template uses consistent status values (quick win #4)
@@ -314,9 +316,9 @@ Read templates/sources.md and verify "Downloaded Documents" section exists.
 
 Tests for album creation workflow documentation.
 
-### TEST: 7 planning phases documented in CLAUDE.md
-CLAUDE.md has no "Building a New Album" section. Verify instead:
-1. CLAUDE.md "Key Routing Rules" contains the line: `**Planning album** → apply /bitwize-music:album-conceptualizer (7 planning phases required)`
+### TEST: 7 planning phases documented
+Neither CLAUDE.md nor the plugin rules has a "Building a New Album" section. Verify instead:
+1. `reference/plugin-rules.md` "## Workflow and routing" contains the route: "Plan an album → `album-conceptualizer` (7 phases)"
 2. `skills/album-conceptualizer/SKILL.md` documents all 7 phases under "## Building the Album: The 7 Planning Phases":
    1. Foundation
    2. Concept Deep Dive
@@ -327,7 +329,7 @@ CLAUDE.md has no "Building a New Album" section. Verify instead:
    7. Confirmation
 
 ### TEST: Album status values documented
-Verify CLAUDE.md documents these album statuses:
+Verify `reference/workflows/status-tracking.md` documents these album statuses ("## Album Statuses" table, and both flows under "### Album Status Flow": documentary and standard), and that `reference/plugin-rules.md` "## Gates and statuses" (**Album** bullet) names the same flow:
 - Concept
 - Research Complete
 - Sources Verified
@@ -336,7 +338,7 @@ Verify CLAUDE.md documents these album statuses:
 - Released
 
 ### TEST: Track status values documented
-Verify CLAUDE.md documents these track statuses:
+Verify `reference/workflows/status-tracking.md` ("## Track Statuses") and `reference/plugin-rules.md` ("## Gates and statuses", **Track** bullet) document these track statuses:
 - Not Started
 - Sources Pending
 - Sources Verified
@@ -345,16 +347,18 @@ Verify CLAUDE.md documents these track statuses:
 - Final
 
 ### TEST: Directory structure documented
-Verify CLAUDE.md documents the directory structure:
+Verify `reference/plugin-rules.md` "## Config and paths" documents the directory structure:
 - `{content_root}/artists/[artist]/albums/[genre]/[album]/`
 - `{audio_root}/artists/[artist]/albums/[genre]/[album]/`
 - `{documents_root}/artists/[artist]/albums/[genre]/[album]/`
 
 ### TEST: Audio path structure warns about the artist folder (regression)
-Read CLAUDE.md "Mirrored path structure" block.
+Read the mirrored path block in `reference/plugin-rules.md` "## Config and paths" (formerly CLAUDE.md "Mirrored path structure"; moved in #664).
 Verify it includes:
 1. The three mirrored path patterns, each containing `artists/[artist]/albums/[genre]/[album]/`
-2. An explicit warning that audio and document paths include the artist folder, plus a "Common mistake" note about omitting it
+2. An explicit statement that the paths include the artist folder: "Paths mirror each other, artist folder included"
+
+The separate "Common mistake: omitting the artist folder" sentence was dropped when the rules were condensed to fit the SessionStart hook's size limit (#664); `skills/import-audio/SKILL.md` carries the "Common Mistakes" guard (next test).
 
 This test was added after a bug where audio files were placed at `{audio_root}/[album]/` instead of the full mirrored path. The concrete-example requirement was dropped by maintainer ruling (2026-07-13): path construction now goes through the `resolve_path` MCP tool, which includes the artist folder automatically, so the pattern block plus warning carries the guard.
 
@@ -366,49 +370,50 @@ Verify it includes:
 3. A "CRITICAL" instruction to use the `resolve_path` MCP tool rather than constructing paths manually
 4. A "Common Mistakes" section covering manual path construction
 
-Also verify CLAUDE.md still routes imports (it references `/bitwize-music:import-audio`).
+Also verify `reference/plugin-rules.md` still routes imports ("Import the keeper → `import-audio --from-suno`").
 
 This test was added after audio files were repeatedly moved to `{audio_root}/[album]/` without the artist folder. Retargeted from a CLAUDE.md section to the import-audio skill by maintainer ruling (2026-07-13): the guidance moved into the skill during doc modularization, and `resolve_path` now prevents the failure structurally.
 
 ### TEST: Session start procedure documented
-Read CLAUDE.md "Session Start" section (numbered steps 1, 1.5, 2, 3, 4, 4.5, 5, 6, 7, 8).
-Verify step 2 is "Load config" (reads `~/.bitwize-music/config.yaml`).
-Verify step 3 is "Load overrides" (checks `paths.overrides`, if present).
-Verify step 4 ("Load state via MCP") calls `get_ideas` to get idea counts.
-Verify it mentions `/bitwize-music:configure` when config missing (step 1 and step 2).
-Verify step 7 mentions `/bitwize-music:album-ideas list` when ideas exist.
+Read `skills/session-start/SKILL.md` (steps 1, 1.5, 1.6, 2, 3, 4, 4.5, 5, 6, 7, 8 — the full procedure moved there from CLAUDE.md in #664).
+Verify "## Step 2: Load Config" reads `~/.bitwize-music/config.yaml`.
+Verify "## Step 3: Load Overrides" reads `paths.overrides` from config.
+Verify "## Step 4: Load State" calls `get_ideas` for idea counts.
+Verify Step 1 sends missing-config cases to Step 2, where the skill recommends `configure`.
+Verify Step 7 recommends `album-ideas` with the `list` argument when ideas exist.
+Verify `reference/plugin-rules.md` "## Session start" tells a fresh session to follow `/bitwize-music:session-start`.
 
 ### TEST: Session startup contextual tips system documented
-Read CLAUDE.md "Session Start" section, step 7.
-Verify section exists: "**Show contextual tips** based on state:"
-Verify all conditional tip categories are documented:
-- No albums → tutorial tip
-- Ideas exist → album-ideas tip
-- In-progress albums → resume tip
-- Overrides loaded → note it; missing → suggest creating them
-- Pending verifications → verification warning
-- One contextual tip from: resume, researcher, pronunciation, clipboard, mastering (pick based on most relevant album state)
+Read `skills/session-start/SKILL.md` "## Step 7: Show Contextual Tips".
+Verify its condition → tip table covers:
+- No albums exist → tutorial tip
+- Ideas exist but no albums → album-ideas tip
+- In-progress albums exist → resume tip
+- Overrides loaded → note it; Overrides missing → suggest creating them
+- Pending verifications → recommend the `verify-sources` skill before generation
 
 (The old "If IDEAS.md has content" framing is gone — ideas are now sourced from the `get_ideas` MCP tool, not a direct IDEAS.md file check.)
 
 ### TEST: Session startup general productivity tips exist
-DROPPED — the standalone "Always show one general productivity tip (rotate randomly)" section no longer exists. It was merged into step 7's "One contextual tip from: resume, researcher, pronunciation, clipboard, mastering" bullet — there is no separate rotating productivity-tips system anymore. No current doc makes this claim.
+Read `skills/session-start/SKILL.md` "## Step 7: Show Contextual Tips".
+Verify it says "Also show one random general tip (rotate through these):" followed by a list of tips (including the pronunciation and clipboard tips). (This was dropped while CLAUDE.md held the session-start procedure; the skill, now its only home, has the rotating list.)
 
 ### TEST: Session startup ends with question
-Read CLAUDE.md "Session Start" section.
-Verify the final step (8) is: `**Ask**: "What would you like to work on?"`
+Read `skills/session-start/SKILL.md`.
+Verify the final step, "## Step 8: Ask", ends with: "What would you like to work on?"
 
-### TEST: Contextual tips use correct skill commands
-Read CLAUDE.md "Session Start" section, step 7.
-Verify these skill references use correct `/bitwize-music:` prefix format:
-- `/bitwize-music:tutorial` (not /tutorial)
-- `/bitwize-music:album-ideas` (not /album-ideas)
-- `/bitwize-music:resume` (not /resume)
+### TEST: Contextual tips name skills and link to host invocation guidance
+Read `skills/session-start/SKILL.md` "## Step 7: Show Contextual Tips". Verify
+it recommends `tutorial`, `album-ideas`, `resume`, and `verify-sources` by name.
+The rotating tips also name `clipboard`, `generate`, `listen`, and
+`mastering-engineer`.
 
-Note: `researcher`, `pronunciation`, `clipboard`, and `mastering` appear only as bare topic labels in the "One contextual tip from: ..." bullet, not as full `/bitwize-music:` command invocations — that's expected, since the bullet names topics to choose from rather than commands to run.
+Follow the invocation guidance linked in Step 7. Verify it gives Claude Code's
+`/bitwize-music:<skill>` syntax and explains how to invoke an installed skill
+by its advertised name or through the skill picker in Codex.
 
 ### TEST: Contextual tips reference overrides path variable
-Read CLAUDE.md "Session Start" section, step 3 ("Load overrides").
+Read `skills/session-start/SKILL.md` "## Step 3: Load Overrides".
 Verify overrides references use the `{overrides}` path variable (e.g. `{overrides}/CLAUDE.md`, `{overrides}/pronunciation-guide.md`), not a hardcoded path.
 
 ### TEST: Checkpoints documented
@@ -583,19 +588,19 @@ Glob: skills/document-hunter/SKILL.md
 ```
 
 ### TEST: Source verification workflow documented
-CLAUDE.md's "Sources & Verification" section was renamed to "### Source Verification Gate". Verify:
-1. CLAUDE.md "Source Verification Gate" documents the Pending → Verified track status flow and that generation is blocked until verification is complete
+The source gate moved from CLAUDE.md's "### Source Verification Gate" to `reference/plugin-rules.md` "## Gates and statuses" (#664). Verify:
+1. Its **Sources** bullet documents `❌ Pending` until the human verifies with `verify-sources`, and that "`pre-generation-check` blocks generation until then"
 2. `reference/workflows/source-verification-handoff.md` documents the human verification handoff triggers (its "When to Stop and Request Verification" section) and the Track Status Workflow
 3. `skills/researcher/SKILL.md` "Core Principles" documents source-priority/hierarchy guidance (e.g. "Primary Sources Are Mandatory")
 
 ### TEST: documents_root path documented
-Verify CLAUDE.md and config docs explain `{documents_root}` path variable.
+Verify `reference/plugin-rules.md` ("## Config and paths") and the config docs (`config/README.md`, `docs/configuration.md`) explain the `{documents_root}` path variable.
 
 ### TEST: Research files must be saved to album directory (regression)
-Read CLAUDE.md "Source Verification Gate" section (formerly "Sources & Verification").
+Read `reference/plugin-rules.md` "## Gates and statuses" (the source gate, formerly CLAUDE.md "Source Verification Gate").
 Verify it includes:
-1. Rule about saving RESEARCH.md and SOURCES.md to album directory (never cwd)
-2. Path format for the album directory: `{content_root}/artists/[artist]/albums/[genre]/[album]/` — documented in CLAUDE.md's "Content Structure" section
+1. Rule about saving RESEARCH.md / SOURCES.md in the album: "saved in the album's RESEARCH.md / SOURCES.md (never the working directory)"
+2. Path format for the album directory: `{content_root}/artists/[artist]/albums/[genre]/[album]/` — documented in its "## Config and paths" block
 
 Read skills/researcher/SKILL.md.
 Verify it includes:
@@ -738,7 +743,7 @@ Search for mastering venv references.
 All should point to `~/.bitwize-music/venv` (not per-folder venv).
 
 ### TEST: Target loudness documented
-Read CLAUDE.md mastering section or reference/mastering/.
+Read reference/mastering/ (the plugin rules have no mastering section).
 Verify it specifies:
 - LUFS target: -14
 - True Peak: -1.0 dBTP
@@ -825,7 +830,7 @@ Verify output directory is constructed as:
 Verify it INCLUDES artist folder (not `{audio_root}/{album}/sheet-music/`)
 
 ### TEST: Sheet music workflow position documented
-CLAUDE.md's Workflow Overview line (`Concept → Research → Write ... → Master → Promo Videos (optional) → Promo Copy (optional) → Release`) does not mention sheet music at all, and there is no "Sheet Music Generation (Optional)" CLAUDE.md section or sheet-music-publisher routing rule. Sheet music's position is documented only via its own skill: verify `skills/sheet-music-publisher/SKILL.md` frontmatter `description:` states "Use after mastering when the user wants sheet music or a songbook for their album."
+The workflow line in `reference/plugin-rules.md` "## Workflow and routing" (`Concept → Research → Write (+ Suno prompt) → ... → Master → Promo → Release`) does not mention sheet music at all, and there is no "Sheet Music Generation (Optional)" section or sheet-music-publisher routing rule there (or in CLAUDE.md, which now only imports `AGENTS.md` and the plugin rules). Sheet music's position is documented only via its own skill: verify `skills/sheet-music-publisher/SKILL.md` frontmatter `description:` states "Use after mastering when the user wants sheet music or a songbook for their album."
 
 ### TEST: Sheet music in Album Completion Checklist
 DROPPED — no current doc states this. CLAUDE.md has no "Album Completion Checklist" section, and the actual checklist content (now `reference/workflows/release-procedures.md` "### 1. Verify Completion Checklist") does not include a sheet-music line item. Sheet music is documented purely as an optional, on-request, post-mastering skill (see "Sheet music workflow position documented" above) — nothing currently claims it belongs on the release checklist.
@@ -839,9 +844,8 @@ Verify `sheet_music:` section exists with:
 - `page_size:` (letter, 9x12, or 6x9)
 - `section_headers:` (boolean)
 
-### TEST: No hardcoded AnthemScore/MuseScore paths
-Search tools/sheet-music/*.py for hardcoded paths outside of the OS detection arrays.
-Should NOT find paths like `/Applications/` or `C:\Program Files\` except in the detection functions.
+### TEST: Sheet music tools use resolved application paths
+Read `tools/sheet-music/transcribe.py` and `tools/sheet-music/prepare_singles.py`. Verify the transcription and export subprocesses use application paths returned by the platform detection functions or supplied by the caller. The detection functions can try platform-specific installation paths, and installation help can show those paths as examples.
 
 ### TEST: Sheet music scripts handle missing software gracefully
 Read tools/sheet-music/transcribe.py.
@@ -899,11 +903,11 @@ $PYTHON "$PLUGIN_DIR/tools/validate_help_completeness.py"
 This checks:
 1. All skills have a SKILL.md file
 2. Every skill is referenced (`/bitwize-music:{name}`) in skills/help/SKILL.md — help must document every skill
-3. CLAUDE.md is a curated router, not a completeness list — the script only fails if CLAUDE.md references a `/bitwize-music:{name}` skill that doesn't exist (a ghost reference); it does not require every skill to appear there
+3. No router file names a skill that doesn't exist: the script scans `reference/plugin-rules.md` (both `/bitwize-music:{name}` mentions and the bare names after "→" in its routing list, skipping MCP tool names with underscores such as `list_skills`), `AGENTS.md` and `CLAUDE.md`, and reports a missing `reference/plugin-rules.md` as a failure. They are curated routers, not completeness lists, so not every skill must appear. `tests/unit/test_validate_help_completeness.py` and `tests/unit/hooks/test_session_rules.py::TestRulesFile::test_every_skill_it_routes_to_exists` enforce this in CI
 
 If this test fails:
 - Add missing skill to skills/help/SKILL.md (in appropriate category)
-- Fix or remove any CLAUDE.md reference to a nonexistent skill
+- Fix or remove any `reference/plugin-rules.md` or `AGENTS.md` reference to a nonexistent skill
 - Update CHANGELOG.md
 
 **Note:** This is critical - if a skill isn't in the help system, users can't discover it!
@@ -924,8 +928,7 @@ Verify these path variables are used consistently:
 - `${CLAUDE_PLUGIN_ROOT}`
 
 ### TEST: All internal markdown links valid
-Search for markdown links `[text](path)` where path starts with `/` or `./`.
-Verify target files exist.
+Use the result of `tests/plugin/test_links.py::TestInternalLinks::test_no_broken_links`. It resolves concrete links against the checkout or the source file's directory. Treat parameterized targets such as `/genres/[genre]/README.md` as template placeholders.
 
 ### TEST: plugin.json matches documentation
 Read .claude-plugin/plugin.json.
@@ -938,7 +941,6 @@ Read .gitignore. Verify it includes:
 - `*.pdf`
 - `primary-sources/`
 - `venv/`
-- `TESTING.md`
 
 ### TEST: No skill.json files exist (standard is SKILL.md)
 ```bash
@@ -949,19 +951,9 @@ Should return zero results. All skills must use SKILL.md format.
 This test was added after an accidental skill.json was found in the resume skill.
 
 ### TEST: Genre references match genres/ directory
-1. List valid genres:
-   ```bash
-   ls -1 genres/
-   ```
-2. Search for genre references in templates and documentation:
-   - `templates/album.md` - genre field examples
-   - `skills/new-album/SKILL.md` - genre parameter
-   - `CLAUDE.md` - genre examples
-3. Any genre referenced in examples must exist in `genres/` directory
-4. Common issues to catch:
-   - `hiphop` vs `hip-hop` (hyphenation)
-   - `synth-wave` vs `synthwave` (hyphenation)
-   - References to genres without documentation
+Verify concrete local genre slugs used in album paths and creation examples in `templates/album.md`, `skills/new-album/SKILL.md`, and `reference/plugin-rules.md` have a matching `genres/<slug>/README.md`. Catch misspellings such as `hiphop` or `synth-wave`.
+
+Use the distribution platform's labels in distributor metadata. For example, the display label R&B/Soul corresponds to the local `rnb` directory.
 
 ---
 
@@ -970,10 +962,10 @@ This test was added after an accidental skill.json was found in the resume skill
 Consistent language across docs.
 
 ### TEST: Casing preservation instruction exists
-Search for "Preserve exact casing" or "preserve.*casing" in:
-- CLAUDE.md
-- skills/configure/SKILL.md
-- skills/tutorial/SKILL.md
+Search for "exact casing" in:
+- reference/plugin-rules.md ("Keep the user's exact casing and spelling.")
+- skills/configure/SKILL.md ("Preserve exact casing")
+- skills/tutorial/SKILL.md ("Preserve exact casing")
 
 All three must have this instruction.
 
@@ -992,8 +984,7 @@ Plugin should be referred to as:
 - `bitwize-music@bitwize-music` (install command)
 
 ### TEST: Consistent brand casing
-Search for "Bitwize Music" (title case) - should not exist.
-Brand should always be "bitwize-music" (lowercase with hyphen).
+Verify current plugin references use `bitwize-music` (lowercase with a hyphen). A quotation of the earlier spelling in release history or in a test illustrates the correction.
 
 ---
 
@@ -1001,9 +992,11 @@ Brand should always be "bitwize-music" (lowercase with hyphen).
 
 Scenario-based tests verifying correct instructions.
 
-### TEST: Missing config recommends /configure
-Read CLAUDE.md "Session Start" section.
-Verify it mentions `/bitwize-music:configure` when config is missing (step 1: "If config missing → suggest: `/bitwize-music:configure`"; step 2: "Load config ... If missing, tell user to run `/bitwize-music:configure`"). (The old "as Option 1" numbered-options framing is gone — it's now a bulleted fallback under each relevant step.)
+### TEST: Missing config recommends the configure skill
+Read `skills/session-start/SKILL.md`.
+Verify Step 1 directs missing-config cases to Step 2. Verify Step 2 recommends
+the installed `configure` skill and resumes once the workspace paths are configured.
+Verify `reference/plugin-rules.md` "## Config and paths" says "No config yet: `/bitwize-music:configure`."
 
 Read skills/tutorial/SKILL.md.
 Verify it mentions `/configure` when config missing.
@@ -1012,14 +1005,14 @@ Verify it mentions `/configure` when config missing.
 CLAUDE.md has no "Building a New Album" section. Read `reference/workflows/album-planning-phases.md` and verify it states: "**Before writing any lyrics or creating tracks**, work through these phases with the user" (also see its Phase 7 "Required before writing" checklist).
 
 ### TEST: Source verification required before generation
-CLAUDE.md's "Sources & Verification" section was renamed to "### Source Verification Gate". Verify it states human verification is required before generation (item 4: "Block generation if verification incomplete — `/bitwize-music:pre-generation-check` enforces this").
+Read `reference/plugin-rules.md` (the source gate moved there from CLAUDE.md's "### Source Verification Gate" in #664). Verify it states human verification is required before generation: "## Workflow and routing" says "**human source verification comes before generation, always**", and the **Sources** bullet in "## Gates and statuses" says "`pre-generation-check` blocks generation until then".
 
 ### TEST: Tutorial skill checks config first
 Read skills/tutorial/SKILL.md.
 Verify it reads config as first step.
 
 ### TEST: Automatic lyrics review documented
-CLAUDE.md has no "Automatic Lyrics Review" section. The closest current equivalents are `skills/lyric-reviewer/SKILL.md` "## The 14-Point Checklist" (see also `skills/lyric-reviewer/checklist-reference.md`) and CLAUDE.md's "Core Principles" bullet ("When user says 'let's work on [track]', scan full lyrics for issues BEFORE doing anything else..."). Verify the 14-point checklist includes, by name:
+CLAUDE.md has no "Automatic Lyrics Review" section. The closest current equivalents are `skills/lyric-reviewer/SKILL.md` "## The 14-Point Checklist" (see also `skills/lyric-reviewer/checklist-reference.md`) and `reference/plugin-rules.md` "## Core principles" bullet ('**"Let's work on [track]"**: scan the whole lyric first for weak lines, prosody, POV/tense slips, ...'). Verify the 14-point checklist includes, by name:
 - Rhyme Check
 - Prosody Check
 - Pronunciation Check
@@ -1036,14 +1029,13 @@ Code quality and best practices.
 
 ### TEST: No TODO/FIXME in production files
 Search for `TODO|FIXME|XXX|HACK` in:
-- CLAUDE.md
+- AGENTS.md
+- reference/plugin-rules.md
 - README.md
 - config/README.md
 - skills/*/SKILL.md
 
-(Exclude test definitions)
-
-Search ONLY the four files/globs listed above. Code files (tools/, servers/) are OUT of scope — detection patterns in code (e.g. gates.py's `[TODO]` regex, or terminology-checker pattern lists) are not findings.
+Flag markers that leave unfinished work in these files. Quoted markers used as examples or as inputs to a check are part of the instructions.
 
 ### TEST: No empty markdown links
 Search for `\[\]\(\)` (empty link text and href).
@@ -1053,12 +1045,8 @@ Search for:
 - `\[.*\]\([^)]*$` (unclosed parens)
 - `\[.*\][^(\[]` (missing parens after bracket)
 
-### TEST: All code blocks have language specified
-Search for triple backticks without language:
-```
-^```$
-```
-(Should be ```bash, ```yaml, ```markdown, etc.)
+### TEST: Runnable snippets declare their language
+Check the opening fence of standalone code and command snippets for a language such as `bash`, `powershell`, `python`, or `yaml`. Plain text output, transcripts, diagrams, and pseudocode can use plain fences or `text`.
 
 ### TEST: README has required sections
 README.md was restructured around a shorter narrative + a "Detailed Documentation" table pointing to docs/. Read README.md and verify these sections exist:
@@ -1105,19 +1093,29 @@ README.md has no "## How It Works" section or ASCII box diagram — it has "## E
 
 This test was added after the README claimed 32 skills when there were actually 38.
 
-### TEST: CLAUDE.md has required sections
-Read CLAUDE.md and verify these top-level (`##`) sections exist:
-- ⚠️ CRITICAL: Finding Albums When User Mentions Them
-- Configuration & Path Resolution
-- MCP Server — Preferred Data Access
-- Session Start
-- Core Principles
-- Workflow Overview
-- Content Structure
-- Versioning & Development
-- Mid-Session Rules
+### TEST: CLAUDE.md imports the instruction files
+Read CLAUDE.md and verify it imports both files: `@AGENTS.md` and `@reference/plugin-rules.md`. (Since #664 it holds nothing else: Claude Code never loads a plugin's CLAUDE.md for users, so the user rules live in `reference/plugin-rules.md`, delivered by the `hooks/session_rules.py` SessionStart hook, and the contributor rules in `AGENTS.md`, which Codex also reads.)
 
-(The old "Project Overview / Configuration / Skills table / Directory Structure / Workflow" names no longer exist as headings — CLAUDE.md has no comprehensive skills table at all now, and "Directory Structure" content lives under "Content Structure".)
+### TEST: Plugin rules have required sections
+Read `reference/plugin-rules.md` and verify these top-level (`##`) sections exist:
+- Finding albums
+- Config and paths
+- Data access
+- Suno
+- Session start
+- Core principles
+- Workflow and routing
+- Gates and statuses
+- Mid-session
+
+### TEST: AGENTS.md has required sections
+Read `AGENTS.md` and verify these top-level (`##`) sections exist:
+- The rules plugin users get
+- Templates
+- Versioning & Development
+
+### TEST: Plugin rules fit the SessionStart hook
+`reference/plugin-rules.md` must stay under 9,000 characters with `{plugin_root}` filled in: Claude Code keeps SessionStart hook output whole only below 10,000 characters, and `hooks/session_rules.py` prints the rules only under its 9,000 limit (otherwise users get a one-line pointer instead). Run `pytest tests/unit/hooks/test_session_rules.py`, which enforces this (`TestRulesFile::test_fits_under_the_hook_limit_with_a_long_install_path`), or check `wc -m reference/plugin-rules.md` is well under 9,000.
 
 ---
 
@@ -1127,14 +1125,15 @@ End-to-end integration test that creates a test album and exercises the full wor
 
 ### TEST: E2E - Full album workflow
 
-**This test creates temporary files and cleans them up afterward.**
+Use an isolated music workspace and create a dedicated temporary directory
+(`{fixture_dir}`) for the input fixtures. Clean up both after the test.
 
 #### Phase 1: Setup
 ```
 1. Read ~/.bitwize-music/config.yaml
-2. Extract content_root, audio_root, artist
-3. Run: /new-album _e2e-test-album electronic
-4. Verify: {content_root}/artists/{artist}/albums/electronic/_e2e-test-album/ exists
+2. Extract content_root, audio_root, and artist. Run rebuild_state() for the temporary workspace.
+3. Run: /new-album e2e-test-album electronic
+4. Verify: {content_root}/artists/{artist}/albums/electronic/e2e-test-album/ exists
 5. Verify: README.md created from template
 6. Verify: tracks/ directory exists
 ```
@@ -1151,38 +1150,38 @@ End-to-end integration test that creates a test album and exercises the full wor
 1. Create RESEARCH.md in {album_path}/
 2. Create SOURCES.md in {album_path}/
 3. Verify: Files in album directory
-4. Verify: Files NOT in working directory or /tmp
+4. Verify: Files NOT in the working directory or {fixture_dir}
 ```
 
 #### Phase 4: Audio Import
 ```
-1. Create dummy WAV: touch /tmp/_e2e-test.wav
-2. Run: /import-audio /tmp/_e2e-test.wav _e2e-test-album
-3. Verify: Audio in {audio_root}/artists/{artist}/albums/electronic/_e2e-test-album/
+1. Create a short, valid stereo WAV at {fixture_dir}/e2e-test.wav
+2. Run: /import-audio {fixture_dir}/e2e-test.wav e2e-test-album
+3. Verify: Audio in {audio_root}/artists/{artist}/albums/electronic/e2e-test-album/
 4. Verify: Full mirrored path structure present
-5. Verify: NOT at {audio_root}/_e2e-test-album/ (wrong - missing structure)
+5. Verify: NOT at {audio_root}/e2e-test-album/ (wrong - missing structure)
 ```
 
 #### Phase 5: Art Import
 ```
-1. Create dummy image: touch /tmp/_e2e-test.png
-2. Run: /import-art /tmp/_e2e-test.png _e2e-test-album
-3. Verify: Art in {audio_root}/artists/{artist}/albums/electronic/_e2e-test-album/album.png
+1. Create a valid PNG at {fixture_dir}/e2e-test.png
+2. Run: /import-art {fixture_dir}/e2e-test.png e2e-test-album
+3. Verify: Art in {audio_root}/artists/{artist}/albums/electronic/e2e-test-album/album.png
 4. Verify: Art in {album_path}/album-art.png
 ```
 
 #### Phase 6: Validation
 ```
-1. Run: /validate-album _e2e-test-album
-2. Verify: All structure checks pass
+1. Run: /validate-album e2e-test-album
+2. Verify: No structure checks fail. The master check can skip because the synthetic album has no master.
 3. Verify: Audio path check passes (full mirrored structure present)
 ```
 
 #### Phase 7: Cleanup
 ```
-1. Remove: {content_root}/artists/{artist}/albums/electronic/_e2e-test-album/
-2. Remove: {audio_root}/artists/{artist}/albums/electronic/_e2e-test-album/
-3. Remove: /tmp/_e2e-test.*
+1. Remove: {content_root}/artists/{artist}/albums/electronic/e2e-test-album/
+2. Remove: {audio_root}/artists/{artist}/albums/electronic/e2e-test-album/
+3. Remove: {fixture_dir}
 4. Verify: No test files remain
 ```
 
@@ -1195,7 +1194,7 @@ E2E TEST SUITE
 PHASE 1: SETUP
 ──────────────
 [PASS] Config loaded: content_root={path}, audio_root={path}, artist={name}
-[PASS] /new-album created _e2e-test-album
+[PASS] /new-album created e2e-test-album
 [PASS] Album directory exists at correct location
 [PASS] README.md created
 [PASS] tracks/ directory exists
@@ -1209,12 +1208,12 @@ PHASE 3: RESEARCH FILES
 ───────────────────────
 [PASS] RESEARCH.md created in album directory
 [PASS] SOURCES.md created in album directory
-[PASS] Files NOT in working directory
+[PASS] Files confined to the album directory
 
 PHASE 4: AUDIO IMPORT
 ─────────────────────
 [PASS] /import-audio executed successfully
-[PASS] Audio at {audio_root}/artists/{artist}/albums/electronic/_e2e-test-album/
+[PASS] Audio at {audio_root}/artists/{artist}/albums/electronic/e2e-test-album/
 [PASS] Full mirrored path structure present
 
 PHASE 5: ART IMPORT
@@ -1254,7 +1253,7 @@ Glob: skills/validate-album/SKILL.md
 ### TEST: /validate-album reads config first
 Read skills/validate-album/SKILL.md.
 Verify it includes:
-1. Step to read `~/.bitwize-music/config.yaml` marked as REQUIRED
+1. Calls `get_config()` before looking up the album and stops if `~/.bitwize-music/config.yaml` is missing
 2. Extracts content_root, audio_root, and artist
 3. Checks audio path includes artist folder
 4. Reports actionable fix commands for issues

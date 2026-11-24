@@ -9,6 +9,7 @@ Usage:
 """
 
 import asyncio
+import contextlib
 import copy
 import importlib
 import importlib.util
@@ -16,7 +17,7 @@ import json
 import sys
 import types
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -113,6 +114,27 @@ from handlers.processing import _helpers as _processing_helpers
 from handlers import _shared as _shared_mod
 
 
+@contextlib.contextmanager
+def _patch_write_state(mock=None):
+    """Patch write_state where the handlers look it up (#679 item 11).
+
+    No handler calls ``server.write_state``: core, album_fields and generation
+    bind ``tools.state.indexer.write_state`` when imported, and status,
+    streaming, rename and the mastering stages import it from the indexer as
+    they run, so ``patch.object(server, "write_state")`` intercepted none of
+    them. This patches every name they use, with one mock.
+    """
+    import tools.state.indexer as indexer_mod
+    from handlers import album_fields, core, generation
+
+    mock = MagicMock() if mock is None else mock
+    with patch.object(indexer_mod, "write_state", mock), \
+         patch.object(core, "write_state", mock), \
+         patch.object(album_fields, "write_state", mock), \
+         patch.object(generation, "write_state", mock):
+        yield mock
+
+
 # ---------------------------------------------------------------------------
 # Shared helpers (duplicated from test_server.py to keep files independent)
 # ---------------------------------------------------------------------------
@@ -168,6 +190,16 @@ SAMPLE_STATE = {
         "plugin_version": "0.50.0",
     },
 }
+
+
+# A Generation Log with take 2 marked ✓ — the status stage needs a keeper
+# before it marks a mastered track Final (#679 item 2).
+_KEEPER_LOG = (
+    "\n## Generation Log\n\n| # | Date | Model | Result | Notes | Rating |\n"
+    "|---|------|-------|--------|-------|--------|\n"
+    "| 1 | 2026-11-01 | v6 | [Listen](https://suno.com/song/x) | first | — |\n"
+    "| 2 | 2026-11-01 | v6 | [Listen](https://suno.com/song/y) | keeper | ✓ |\n"
+)
 
 
 def _run(coro):
@@ -313,7 +345,7 @@ class TestQcAudioComprehensive:
 
         call_count = []
 
-        def mock_qc(filepath, checks=None, genre=None):
+        def mock_qc(filepath, checks=None, genre=None, ceiling_db=None):
             name = Path(filepath).name
             call_count.append(name)
             return self._mock_qc_result(name)
@@ -332,7 +364,7 @@ class TestQcAudioComprehensive:
         audio_dir, state = self._make_audio_dir(tmp_path, 2)
         mock_cache = MockStateCache(state)
 
-        def mock_qc(filepath, checks=None, genre=None):
+        def mock_qc(filepath, checks=None, genre=None, ceiling_db=None):
             return self._mock_qc_result(Path(filepath).name, verdict="PASS")
 
         with patch.object(_shared_mod, "cache", mock_cache), \
@@ -351,7 +383,7 @@ class TestQcAudioComprehensive:
 
         call_idx = [0]
 
-        def mock_qc(filepath, checks=None, genre=None):
+        def mock_qc(filepath, checks=None, genre=None, ceiling_db=None):
             idx = call_idx[0]
             call_idx[0] += 1
             if idx == 0:
@@ -374,7 +406,7 @@ class TestQcAudioComprehensive:
         audio_dir, state = self._make_audio_dir(tmp_path, 1)
         mock_cache = MockStateCache(state)
 
-        def mock_qc(filepath, checks=None, genre=None):
+        def mock_qc(filepath, checks=None, genre=None, ceiling_db=None):
             return self._mock_qc_result(
                 Path(filepath).name, verdict="WARN", spectral_status="WARN"
             )
@@ -398,7 +430,7 @@ class TestQcAudioComprehensive:
         state["config"]["artist_name"] = "test-artist"
         mock_cache = MockStateCache(state)
 
-        def mock_qc(filepath, checks=None, genre=None):
+        def mock_qc(filepath, checks=None, genre=None, ceiling_db=None):
             return self._mock_qc_result(Path(filepath).name)
 
         with patch.object(_shared_mod, "cache", mock_cache), \
@@ -416,7 +448,7 @@ class TestQcAudioComprehensive:
 
         captured_checks = []
 
-        def mock_qc(filepath, checks=None, genre=None):
+        def mock_qc(filepath, checks=None, genre=None, ceiling_db=None):
             captured_checks.append(checks)
             return self._mock_qc_result(Path(filepath).name)
 
@@ -427,6 +459,34 @@ class TestQcAudioComprehensive:
 
         assert len(captured_checks) == 1
         assert captured_checks[0] == ["format", "phase"]
+
+    @pytest.mark.parametrize("kwargs, config, expected", [
+        ({}, None, -1.0),
+        ({"ceiling_db": -2.0}, None, -2.0),
+        ({"ceiling_db": -1.0}, {"mastering": {"true_peak_ceiling": -2.0}}, -1.0),
+        ({}, {"mastering": {"true_peak_ceiling": -2.0}}, -2.0),
+        ({"genre": "edm"}, None, -1.5),  # opus-safe genre tightens to -1.5
+    ])
+    def test_truepeak_checked_against_the_mastering_ceiling(
+        self, tmp_path, kwargs, config, expected,
+    ):
+        """The truepeak check used a fixed -1.0 whatever the master's ceiling (#683)."""
+        audio_dir, state = self._make_audio_dir(tmp_path, 1)
+        mock_cache = MockStateCache(state)
+        ceilings = []
+
+        def mock_qc(filepath, checks=None, genre=None, ceiling_db=None):
+            ceilings.append(ceiling_db)
+            return self._mock_qc_result(Path(filepath).name)
+
+        with patch.object(_shared_mod, "cache", mock_cache), \
+             patch.object(_processing_helpers, "_check_mastering_deps", return_value=None), \
+             patch("tools.mastering.config.load_config", return_value=config), \
+             patch("tools.mastering.qc_tracks.qc_track", side_effect=mock_qc):
+            result = json.loads(_run(server.qc_audio("test-album", **kwargs)))
+
+        assert ceilings == [expected]
+        assert result["ceiling_db"] == expected
 
 
 # =============================================================================
@@ -512,6 +572,9 @@ class TestMasterAlbumPipeline:
             "max_short_term_lufs": lufs + 0.5,
             "max_momentary_lufs": lufs + 1.0,
             "short_term_range": 8.0,
+            # analyze_track's EBU R128 loudness range, which the anchor
+            # requires since #681 (item 9).
+            "lra": 8.0,
             "stl_95": lufs + 0.3,
             "low_rms": -20.0,
             "vocal_rms": -18.0,
@@ -561,7 +624,7 @@ class TestMasterAlbumPipeline:
 
         qc_calls = []
 
-        def mock_qc(filepath, checks=None, genre=None):
+        def mock_qc(filepath, checks=None, genre=None, ceiling_db=None):
             qc_calls.append({"path": Path(filepath).name, "checks": checks})
             return self._mock_qc_result(Path(filepath).name)
 
@@ -583,7 +646,7 @@ class TestMasterAlbumPipeline:
              patch("tools.mastering.master_tracks.master_track", side_effect=mock_master), \
              patch("tools.mastering.analyze_tracks.analyze_track", side_effect=mock_analyze), \
              patch("tools.mastering.qc_tracks.qc_track", side_effect=mock_qc), \
-             patch.object(server, "write_state"):
+             _patch_write_state():
             _run(server.master_album("test-album"))
 
         assert len(qc_calls) >= 1, "qc_track must be invoked at least once (pre-QC)"
@@ -603,6 +666,73 @@ class TestMasterAlbumPipeline:
                 f"Pre-QC must still run '{essential}' — mastering cannot fix it"
             )
 
+    @pytest.mark.parametrize("album_mastering, warned", [
+        ({}, True),
+        ({"adm_validation_enabled": False}, False),
+    ])
+    def test_global_adm_setting_is_reported_not_ignored(
+        self, tmp_path, album_mastering, warned,
+    ):
+        """config.yaml's adm_validation_enabled is never honoured; master_album
+        used to skip ADM without a word (#683)."""
+        audio_dir, state = self._make_audio_dir(tmp_path, 1)
+        state["albums"]["test-album"]["mastering"] = album_mastering
+        mock_cache = MockStateCache(state)
+
+        def mock_master(input_path, output_path, **kwargs):
+            _write_tiny_stereo_wav(output_path)
+            return {"original_lufs": -20.0, "final_lufs": -14.0,
+                    "gain_applied": 6.0, "final_peak": -1.5}
+
+        with patch.object(_shared_mod, "cache", mock_cache), \
+             patch.object(_processing_helpers, "_check_mastering_deps", return_value=None), \
+             patch("tools.mastering.config.load_config",
+                   return_value={"mastering": {"adm_validation_enabled": True}}), \
+             patch("tools.mastering.master_tracks.load_genre_presets", return_value={}), \
+             patch("tools.mastering.master_tracks.master_track", side_effect=mock_master), \
+             patch("tools.mastering.analyze_tracks.analyze_track",
+                   side_effect=lambda f: self._mock_analyze(Path(f).name)), \
+             patch("tools.mastering.qc_tracks.qc_track",
+                   side_effect=lambda f, c=None, g=None, _ceiling=None: self._mock_qc_result(Path(f).name)), \
+             _patch_write_state():
+            result = json.loads(_run(server.master_album("test-album")))
+
+        notes = [w for w in result.get("warnings", []) if "adm_validation_enabled" in w]
+        assert bool(notes) is warned, result.get("warnings")
+
+    def test_post_qc_truepeak_uses_this_runs_ceiling(self, tmp_path):
+        """Post-QC measured true peak against a fixed -1.0, not the ceiling
+        the album was mastered to (#683)."""
+        audio_dir, state = self._make_audio_dir(tmp_path, 1)
+        mock_cache = MockStateCache(state)
+        qc_calls = []
+
+        def mock_qc(filepath, checks=None, genre=None, ceiling_db=None):
+            qc_calls.append({"checks": checks, "ceiling_db": ceiling_db})
+            return self._mock_qc_result(Path(filepath).name)
+
+        def mock_master(input_path, output_path, **kwargs):
+            _write_tiny_stereo_wav(output_path)
+            return {"original_lufs": -20.0, "final_lufs": -14.0,
+                    "gain_applied": 6.0, "final_peak": -2.5}
+
+        def mock_analyze(filepath):
+            return self._mock_analyze(Path(filepath).name, lufs=-14.0, peak_db=-2.5)
+
+        with patch.object(_shared_mod, "cache", mock_cache), \
+             patch.object(_processing_helpers, "_check_mastering_deps", return_value=None), \
+             patch("tools.mastering.config.load_config", return_value=None), \
+             patch("tools.mastering.master_tracks.load_genre_presets", return_value={}), \
+             patch("tools.mastering.master_tracks.master_track", side_effect=mock_master), \
+             patch("tools.mastering.analyze_tracks.analyze_track", side_effect=mock_analyze), \
+             patch("tools.mastering.qc_tracks.qc_track", side_effect=mock_qc), \
+             _patch_write_state():
+            _run(server.master_album("test-album", ceiling_db=-2.0))
+
+        post_qc = [c for c in qc_calls if c["checks"] is None]
+        assert post_qc, "post-QC (all checks) never ran"
+        assert all(c["ceiling_db"] == -2.0 for c in post_qc)
+
     def test_pre_qc_failure_stops_pipeline(self, tmp_path):
         """Pre-QC FAIL should stop pipeline before mastering."""
         audio_dir, state = self._make_audio_dir(tmp_path, 2)
@@ -610,7 +740,7 @@ class TestMasterAlbumPipeline:
 
         call_idx = [0]
 
-        def mock_qc(filepath, checks=None, genre=None):
+        def mock_qc(filepath, checks=None, genre=None, ceiling_db=None):
             idx = call_idx[0]
             call_idx[0] += 1
             name = Path(filepath).name
@@ -666,7 +796,7 @@ class TestMasterAlbumPipeline:
              patch("tools.mastering.master_tracks.master_track", side_effect=mock_master), \
              patch("tools.mastering.analyze_tracks.analyze_track", side_effect=mock_analyze), \
              patch("tools.mastering.qc_tracks.qc_track",
-                   side_effect=lambda f, c=None, g=None: self._mock_qc_result(Path(f).name)):
+                   side_effect=lambda f, c=None, g=None, _ceiling=None: self._mock_qc_result(Path(f).name)):
             result = json.loads(_run(server.master_album("test-album")))
 
         assert master_called[0], "Mastering should have run before verification"
@@ -704,7 +834,7 @@ class TestMasterAlbumPipeline:
              patch("tools.mastering.master_tracks.master_track", side_effect=mock_master), \
              patch("tools.mastering.analyze_tracks.analyze_track", side_effect=mock_analyze), \
              patch("tools.mastering.qc_tracks.qc_track",
-                   side_effect=lambda f, c=None, g=None: self._mock_qc_result(Path(f).name)):
+                   side_effect=lambda f, c=None, g=None, _ceiling=None: self._mock_qc_result(Path(f).name)):
             result = json.loads(_run(server.master_album("test-album")))
 
         assert result["failed_stage"] == "verification"
@@ -733,7 +863,7 @@ class TestMasterAlbumPipeline:
 
         qc_call_idx = [0]
 
-        def mock_qc(filepath, checks=None, genre=None):
+        def mock_qc(filepath, checks=None, genre=None, ceiling_db=None):
             idx = qc_call_idx[0]
             qc_call_idx[0] += 1
             name = Path(filepath).name
@@ -759,13 +889,17 @@ class TestMasterAlbumPipeline:
 
         content_dir = tmp_path / "content" / "artists" / "test-artist" / "albums" / "electronic" / "test-album" / "tracks"
         content_dir.mkdir(parents=True)
+        # Only this album's two tracks, each with a ✓ keeper: the status stage
+        # marks a mastered track Final only when the user picked a keeper
+        # (#679 item 2), and every stage must pass here.
+        state["albums"]["test-album"]["tracks"] = {}
         for i in range(2):
             slug = f"{i+1:02d}-track-{i+1}"
             track_file = content_dir / f"{slug}.md"
             track_file.write_text(
                 f"# Track {i+1}\n\n"
                 f"| **Status** | Generated |\n"
-                f"| **Explicit** | No |\n",
+                f"| **Explicit** | No |\n" + _KEEPER_LOG,
                 encoding="utf-8",
             )
             state["albums"]["test-album"]["tracks"][slug] = {
@@ -800,7 +934,7 @@ class TestMasterAlbumPipeline:
         def mock_analyze(filepath):
             return self._mock_analyze(Path(filepath).name, lufs=-14.0)
 
-        def mock_qc(filepath, checks=None, genre=None):
+        def mock_qc(filepath, checks=None, genre=None, ceiling_db=None):
             return self._mock_qc_result(Path(filepath).name)
 
         with patch.object(_shared_mod, "cache", mock_cache), \
@@ -809,7 +943,7 @@ class TestMasterAlbumPipeline:
              patch("tools.mastering.master_tracks.master_track", side_effect=mock_master), \
              patch("tools.mastering.analyze_tracks.analyze_track", side_effect=mock_analyze), \
              patch("tools.mastering.qc_tracks.qc_track", side_effect=mock_qc), \
-             patch.object(server, "write_state"):
+             _patch_write_state():
             result = json.loads(_run(server.master_album("test-album")))
 
         assert result["stage_reached"] == "complete"
@@ -845,7 +979,7 @@ class TestMasterAlbumPipeline:
         content_dir.mkdir(parents=True)
         track_file = content_dir / "01-track-1.md"
         track_file.write_text(
-            "# Track 1\n\n| **Status** | Generated |\n| **Explicit** | No |\n",
+            "# Track 1\n\n| **Status** | Generated |\n| **Explicit** | No |\n" + _KEEPER_LOG,
             encoding="utf-8",
         )
         state["albums"]["test-album"]["tracks"] = {
@@ -885,8 +1019,8 @@ class TestMasterAlbumPipeline:
              patch("tools.mastering.analyze_tracks.analyze_track",
                    side_effect=lambda f: self._mock_analyze(Path(f).name, lufs=-14.0)), \
              patch("tools.mastering.qc_tracks.qc_track",
-                   side_effect=lambda f, c=None, g=None: self._mock_qc_result(Path(f).name)), \
-             patch.object(server, "write_state"), \
+                   side_effect=lambda f, c=None, g=None, _ceiling=None: self._mock_qc_result(Path(f).name)), \
+             _patch_write_state(), \
              patch.object(server, "parse_track_file", return_value={"status": "Final"}):
             result = json.loads(_run(server.master_album("test-album")))
 
@@ -904,7 +1038,7 @@ class TestMasterAlbumPipeline:
         content_dir.mkdir(parents=True)
         track_file = content_dir / "01-track-1.md"
         track_file.write_text(
-            "# Track 1\n\n| **Status** | Generated |\n| **Explicit** | No |\n",
+            "# Track 1\n\n| **Status** | Generated |\n| **Explicit** | No |\n" + _KEEPER_LOG,
             encoding="utf-8",
         )
         state["albums"]["test-album"]["tracks"] = {
@@ -943,8 +1077,8 @@ class TestMasterAlbumPipeline:
              patch("tools.mastering.analyze_tracks.analyze_track",
                    side_effect=lambda f: self._mock_analyze(Path(f).name, lufs=-14.0)), \
              patch("tools.mastering.qc_tracks.qc_track",
-                   side_effect=lambda f, c=None, g=None: self._mock_qc_result(Path(f).name)), \
-             patch.object(server, "write_state"), \
+                   side_effect=lambda f, c=None, g=None, _ceiling=None: self._mock_qc_result(Path(f).name)), \
+             _patch_write_state(), \
              patch.object(server, "parse_track_file", return_value={"status": "Final"}):
             result = json.loads(_run(server.master_album("test-album")))
 
@@ -976,8 +1110,8 @@ class TestMasterAlbumPipeline:
              patch("tools.mastering.analyze_tracks.analyze_track",
                    side_effect=lambda f: self._mock_analyze(Path(f).name, lufs=-14.0)), \
              patch("tools.mastering.qc_tracks.qc_track",
-                   side_effect=lambda f, c=None, g=None: self._mock_qc_result(Path(f).name)), \
-             patch.object(server, "write_state"):
+                   side_effect=lambda f, c=None, g=None, _ceiling=None: self._mock_qc_result(Path(f).name)), \
+             _patch_write_state():
             result = json.loads(_run(server.master_album("test-album", genre="rock")))
 
         assert result["settings"]["genre"] == "rock"
@@ -1000,7 +1134,7 @@ class TestMasterAlbumPipeline:
                 "final_peak": -1.5,
             }
 
-        def mock_qc(filepath, checks=None, genre=None):
+        def mock_qc(filepath, checks=None, genre=None, ceiling_db=None):
             name = Path(filepath).name
             r = self._mock_qc_result(name)
             r["checks"]["spectral"]["status"] = "WARN"
@@ -1015,7 +1149,7 @@ class TestMasterAlbumPipeline:
              patch("tools.mastering.analyze_tracks.analyze_track",
                    side_effect=lambda f: self._mock_analyze(Path(f).name, lufs=-14.0)), \
              patch("tools.mastering.qc_tracks.qc_track", side_effect=mock_qc), \
-             patch.object(server, "write_state"):
+             _patch_write_state():
             result = json.loads(_run(server.master_album("test-album")))
 
         assert result["stage_reached"] == "complete"
@@ -1052,8 +1186,8 @@ class TestMasterAlbumPipeline:
              patch("tools.mastering.master_tracks.master_track", side_effect=mock_master), \
              patch("tools.mastering.analyze_tracks.analyze_track", side_effect=mock_analyze), \
              patch("tools.mastering.qc_tracks.qc_track",
-                   side_effect=lambda f, c=None, g=None: self._mock_qc_result(Path(f).name)), \
-             patch.object(server, "write_state"):
+                   side_effect=lambda f, c=None, g=None, _ceiling=None: self._mock_qc_result(Path(f).name)), \
+             _patch_write_state():
             result = json.loads(_run(server.master_album("test-album")))
 
         tinny_warns = [w for w in result["warnings"] if "tinny" in w.lower()]
@@ -1090,7 +1224,7 @@ class TestMasterAlbumPipeline:
              patch("tools.mastering.master_tracks.master_track", side_effect=mock_master), \
              patch("tools.mastering.analyze_tracks.analyze_track", side_effect=mock_analyze), \
              patch("tools.mastering.qc_tracks.qc_track",
-                   side_effect=lambda f, c=None, g=None: self._mock_qc_result(Path(f).name)):
+                   side_effect=lambda f, c=None, g=None, _ceiling=None: self._mock_qc_result(Path(f).name)):
             result = json.loads(_run(server.master_album("test-album")))
 
         assert result["failed_stage"] == "verification"
@@ -1112,7 +1246,7 @@ class TestMasterAlbumPipeline:
              patch("tools.mastering.analyze_tracks.analyze_track",
                    side_effect=lambda f: self._mock_analyze(Path(f).name)), \
              patch("tools.mastering.qc_tracks.qc_track",
-                   side_effect=lambda f, c=None, g=None: self._mock_qc_result(Path(f).name)):
+                   side_effect=lambda f, c=None, g=None, _ceiling=None: self._mock_qc_result(Path(f).name)):
             result = json.loads(_run(server.master_album("test-album")))
 
         assert result["failed_stage"] == "mastering"
@@ -1151,8 +1285,8 @@ class TestMasterAlbumPipeline:
              patch("tools.mastering.analyze_tracks.analyze_track",
                    side_effect=lambda f: self._mock_analyze(Path(f).name, lufs=-14.0)), \
              patch("tools.mastering.qc_tracks.qc_track",
-                   side_effect=lambda f, c=None, g=None: self._mock_qc_result(Path(f).name)), \
-             patch.object(server, "write_state"):
+                   side_effect=lambda f, c=None, g=None, _ceiling=None: self._mock_qc_result(Path(f).name)), \
+             _patch_write_state():
             result = json.loads(_run(server.master_album("test-album")))
 
         assert result["stage_reached"] == "complete"
@@ -1188,8 +1322,8 @@ class TestMasterAlbumPipeline:
              patch("tools.mastering.analyze_tracks.analyze_track",
                    side_effect=lambda f: self._mock_analyze(Path(f).name, lufs=-13.0)), \
              patch("tools.mastering.qc_tracks.qc_track",
-                   side_effect=lambda f, c=None, g=None: self._mock_qc_result(Path(f).name)), \
-             patch.object(server, "write_state"):
+                   side_effect=lambda f, c=None, g=None, _ceiling=None: self._mock_qc_result(Path(f).name)), \
+             _patch_write_state():
             result = json.loads(_run(server.master_album("test-album", genre="country")))
 
         assert result["settings"]["genre"] == "country"
@@ -1257,7 +1391,7 @@ class TestMasterAlbumPipeline:
              patch("tools.mastering.master_tracks.master_track", side_effect=mock_master), \
              patch("tools.mastering.analyze_tracks.analyze_track", side_effect=mock_analyze), \
              patch("tools.mastering.qc_tracks.qc_track",
-                   side_effect=lambda f, c=None, g=None: self._mock_qc_result(Path(f).name)), \
+                   side_effect=lambda f, c=None, g=None, _ceiling=None: self._mock_qc_result(Path(f).name)), \
              patch("tools.mastering.fix_dynamic_track.fix_dynamic", side_effect=mock_fix_dynamic), \
              patch("soundfile.read", return_value=(fake_audio, 44100)), \
              patch("soundfile.write"):
@@ -1268,6 +1402,54 @@ class TestMasterAlbumPipeline:
         assert result["stages"]["verification"]["all_within_spec"] is True
         assert len(result["stages"]["verification"]["auto_recovered"]) == 1
         assert result["stages"]["verification"]["auto_recovered"][0]["filename"] == "01-track-1.wav"
+
+    @pytest.mark.parametrize("cuts, expected_eq", [
+        # Cuts disabled (or no genre cut): no EQ at all. Recovery used to pass
+        # None here, and fix_dynamic then applied its own -2 dB at 3.5 kHz (#683).
+        ({"cut_highmid": 0.0, "cut_highs": 0.0}, []),
+        ({}, []),
+        ({"cut_highmid": -1.5}, [(3500.0, -1.5, 1.5)]),
+    ])
+    def test_auto_recovery_honours_the_runs_eq_cuts(self, tmp_path, cuts, expected_eq):
+        import numpy as np_
+        audio_dir, state = self._make_audio_dir(tmp_path, 1)
+        mock_cache = MockStateCache(state)
+
+        def mock_master(input_path, output_path, **kwargs):
+            _write_tiny_stereo_wav(output_path)
+            return {"original_lufs": -20.0, "final_lufs": -14.0,
+                    "gain_applied": 6.0, "final_peak": -1.5}
+
+        analyze_call_count = [0]
+
+        def mock_analyze(filepath):
+            idx = analyze_call_count[0]
+            analyze_call_count[0] += 1
+            name = Path(filepath).name
+            if idx >= 2:  # re-verify after recovery
+                return self._mock_analyze(name, lufs=-14.0, peak_db=-1.1)
+            return self._mock_analyze(name, lufs=-16.0, peak_db=-1.0)
+
+        seen_eq = []
+
+        def mock_fix_dynamic(data, rate, target_lufs=-14.0, eq_settings=None, ceiling_db=-1.0):
+            seen_eq.append(eq_settings)
+            return data, {"original_lufs": -16.0, "final_lufs": -14.0, "final_peak_db": -1.1}
+
+        with patch.object(_shared_mod, "cache", mock_cache), \
+             patch.object(_processing_helpers, "_check_mastering_deps", return_value=None), \
+             patch("tools.mastering.config.load_config", return_value=None), \
+             patch("tools.mastering.master_tracks.load_genre_presets", return_value={}), \
+             patch("tools.mastering.master_tracks.master_track", side_effect=mock_master), \
+             patch("tools.mastering.analyze_tracks.analyze_track", side_effect=mock_analyze), \
+             patch("tools.mastering.qc_tracks.qc_track",
+                   side_effect=lambda f, c=None, g=None, _ceiling=None: self._mock_qc_result(Path(f).name)), \
+             patch("tools.mastering.fix_dynamic_track.fix_dynamic", side_effect=mock_fix_dynamic), \
+             patch("soundfile.read", return_value=(np_.zeros((100, 2)), 44100)), \
+             patch("soundfile.write"):
+            _run(server.master_album("test-album", **cuts))
+
+        assert seen_eq == [expected_eq]
 
     def test_auto_recovery_skips_non_recoverable(self, tmp_path):
         """LUFS too high or peak exceeds ceiling → no fix attempted, fails normally."""
@@ -1300,7 +1482,7 @@ class TestMasterAlbumPipeline:
              patch("tools.mastering.master_tracks.master_track", side_effect=mock_master), \
              patch("tools.mastering.analyze_tracks.analyze_track", side_effect=mock_analyze), \
              patch("tools.mastering.qc_tracks.qc_track",
-                   side_effect=lambda f, c=None, g=None: self._mock_qc_result(Path(f).name)), \
+                   side_effect=lambda f, c=None, g=None, _ceiling=None: self._mock_qc_result(Path(f).name)), \
              patch("tools.mastering.fix_dynamic_track.fix_dynamic", side_effect=mock_fix_dynamic):
             result = json.loads(_run(server.master_album("test-album")))
 
@@ -1343,7 +1525,7 @@ class TestMasterAlbumPipeline:
              patch("tools.mastering.master_tracks.master_track", side_effect=mock_master), \
              patch("tools.mastering.analyze_tracks.analyze_track", side_effect=mock_analyze), \
              patch("tools.mastering.qc_tracks.qc_track",
-                   side_effect=lambda f, c=None, g=None: self._mock_qc_result(Path(f).name)), \
+                   side_effect=lambda f, c=None, g=None, _ceiling=None: self._mock_qc_result(Path(f).name)), \
              patch("tools.mastering.fix_dynamic_track.fix_dynamic", side_effect=mock_fix_dynamic), \
              patch("soundfile.read", return_value=(fake_audio, 44100)), \
              patch("soundfile.write"):
@@ -1396,7 +1578,7 @@ class TestMasterAlbumPipeline:
              patch("tools.mastering.master_tracks.master_track", side_effect=mock_master), \
              patch("tools.mastering.analyze_tracks.analyze_track", side_effect=mock_analyze), \
              patch("tools.mastering.qc_tracks.qc_track",
-                   side_effect=lambda f, c=None, g=None: self._mock_qc_result(Path(f).name)), \
+                   side_effect=lambda f, c=None, g=None, _ceiling=None: self._mock_qc_result(Path(f).name)), \
              patch("tools.mastering.fix_dynamic_track.fix_dynamic", side_effect=mock_fix_dynamic), \
              patch("soundfile.read", return_value=(fake_audio, 44100)), \
              patch("soundfile.write"):
@@ -1443,8 +1625,8 @@ class TestMasterAlbumPipeline:
              patch("tools.mastering.analyze_tracks.analyze_track",
                    side_effect=lambda f: self._mock_analyze(Path(f).name, lufs=-14.0)), \
              patch("tools.mastering.qc_tracks.qc_track",
-                   side_effect=lambda f, c=None, g=None: self._mock_qc_result(Path(f).name)), \
-             patch.object(server, "write_state"):
+                   side_effect=lambda f, c=None, g=None, _ceiling=None: self._mock_qc_result(Path(f).name)), \
+             _patch_write_state():
             json.loads(_run(server.master_album("test-album")))
 
         assert len(captured_kwargs) == 1
@@ -1502,8 +1684,8 @@ class TestMasterAlbumPipeline:
              patch("tools.mastering.analyze_tracks.analyze_track",
                    side_effect=lambda f: self._mock_analyze(Path(f).name, lufs=-14.0)), \
              patch("tools.mastering.qc_tracks.qc_track",
-                   side_effect=lambda f, c=None, g=None: self._mock_qc_result(Path(f).name)), \
-             patch.object(server, "write_state"):
+                   side_effect=lambda f, c=None, g=None, _ceiling=None: self._mock_qc_result(Path(f).name)), \
+             _patch_write_state():
             json.loads(_run(server.master_album("test-album")))
 
         assert captured == self.EXPECTED_FADES
@@ -1560,7 +1742,7 @@ class TestMasterAlbumPipeline:
                    side_effect=self._fade_spy({})), \
              patch("tools.mastering.analyze_tracks.analyze_track", side_effect=mock_analyze), \
              patch("tools.mastering.qc_tracks.qc_track",
-                   side_effect=lambda f, c=None, g=None: self._mock_qc_result(Path(f).name)), \
+                   side_effect=lambda f, c=None, g=None, _ceiling=None: self._mock_qc_result(Path(f).name)), \
              patch("tools.mastering.fix_dynamic_track.fix_dynamic", side_effect=mock_fix_dynamic), \
              patch("tools.mastering.master_tracks.apply_fade_out", side_effect=spy_fade), \
              patch("soundfile.read", return_value=(np_.zeros((100, 2)), 44100)), \
@@ -1617,7 +1799,7 @@ class TestMasterAlbumPipeline:
              patch("tools.mastering.master_tracks.master_track", side_effect=mock_master), \
              patch("tools.mastering.analyze_tracks.analyze_track", side_effect=mock_analyze), \
              patch("tools.mastering.qc_tracks.qc_track",
-                   side_effect=lambda f, c=None, g=None: self._mock_qc_result(Path(f).name)), \
+                   side_effect=lambda f, c=None, g=None, _ceiling=None: self._mock_qc_result(Path(f).name)), \
              patch("tools.mastering.fix_dynamic_track.fix_dynamic", side_effect=mock_fix_dynamic), \
              patch("soundfile.read", return_value=(fake_audio, 44100)), \
              patch("soundfile.write"):
@@ -1900,7 +2082,7 @@ class TestMasterAlbumStaging:
              patch("tools.mastering.analyze_tracks.analyze_track",
                    side_effect=lambda f: self._mock_analyze(Path(f).name)), \
              patch("tools.mastering.qc_tracks.qc_track",
-                   side_effect=lambda f, c=None, g=None: self._mock_qc_result(Path(f).name)):
+                   side_effect=lambda f, c=None, g=None, _ceiling=None: self._mock_qc_result(Path(f).name)):
             with pytest.raises(RuntimeError, match="simulated mastering crash"):
                 _run(server.master_album("test-album"))
 
@@ -1935,8 +2117,8 @@ class TestMasterAlbumStaging:
              patch("tools.mastering.analyze_tracks.analyze_track",
                    side_effect=lambda f: self._mock_analyze(Path(f).name, lufs=-14.0)), \
              patch("tools.mastering.qc_tracks.qc_track",
-                   side_effect=lambda f, c=None, g=None: self._mock_qc_result(Path(f).name)), \
-             patch.object(server, "write_state"):
+                   side_effect=lambda f, c=None, g=None, _ceiling=None: self._mock_qc_result(Path(f).name)), \
+             _patch_write_state():
             result = json.loads(_run(server.master_album("test-album")))
 
         assert result["stage_reached"] == "complete"
@@ -1978,8 +2160,8 @@ class TestMasterAlbumStaging:
              patch("tools.mastering.analyze_tracks.analyze_track",
                    side_effect=lambda f: self._mock_analyze(Path(f).name, lufs=-14.0)), \
              patch("tools.mastering.qc_tracks.qc_track",
-                   side_effect=lambda f, c=None, g=None: self._mock_qc_result(Path(f).name)), \
-             patch.object(server, "write_state"):
+                   side_effect=lambda f, c=None, g=None, _ceiling=None: self._mock_qc_result(Path(f).name)), \
+             _patch_write_state():
             result = json.loads(_run(server.master_album("test-album")))
 
         assert result["stage_reached"] == "complete"
@@ -2004,7 +2186,7 @@ class TestMasterAlbumStaging:
              patch("tools.mastering.analyze_tracks.analyze_track",
                    side_effect=lambda f: self._mock_analyze(Path(f).name)), \
              patch("tools.mastering.qc_tracks.qc_track",
-                   side_effect=lambda f, c=None, g=None: self._mock_qc_result(Path(f).name)):
+                   side_effect=lambda f, c=None, g=None, _ceiling=None: self._mock_qc_result(Path(f).name)):
             result = json.loads(_run(server.master_album("test-album")))
 
         assert result["failed_stage"] == "mastering"
@@ -2089,8 +2271,8 @@ class TestMasterAlbumMasteringSamplesStage:
              patch("tools.mastering.analyze_tracks.analyze_track",
                    side_effect=lambda f: self._mock_analyze(Path(f).name)), \
              patch("tools.mastering.qc_tracks.qc_track",
-                   side_effect=lambda f, c=None, g=None: self._mock_qc(Path(f).name)), \
-             patch.object(server, "write_state"):
+                   side_effect=lambda f, c=None, g=None, _ceiling=None: self._mock_qc(Path(f).name)), \
+             _patch_write_state():
             result = json.loads(_run(server.master_album("test-album")))
 
         assert result["failed_stage"] is None
@@ -2125,8 +2307,8 @@ class TestMasterAlbumMasteringSamplesStage:
              patch("tools.mastering.analyze_tracks.analyze_track",
                    side_effect=lambda f: self._mock_analyze(Path(f).name)), \
              patch("tools.mastering.qc_tracks.qc_track",
-                   side_effect=lambda f, c=None, g=None: self._mock_qc(Path(f).name)), \
-             patch.object(server, "write_state"):
+                   side_effect=lambda f, c=None, g=None, _ceiling=None: self._mock_qc(Path(f).name)), \
+             _patch_write_state():
             result = json.loads(_run(server.master_album("test-album")))
 
         assert result["failed_stage"] == "mastering_samples"

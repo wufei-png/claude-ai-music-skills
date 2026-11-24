@@ -75,6 +75,8 @@ def _analysis(**overrides) -> dict:
         "filename": "01.wav",
         "lufs": -14.0,
         "short_term_range": 6.5,
+        # The LRA floor reads ``lra`` (EBU R128) since #681 (item 9).
+        "lra": 6.5,
         "stl_95": -10.5,
         "low_rms": -18.0,
         "vocal_rms": -16.0,
@@ -126,6 +128,36 @@ class TestClassifyOutliers:
         assert len(lufs_violations) == 1
         assert lufs_violations[0]["severity"] == "ok"
 
+    @pytest.mark.parametrize("metric, key, tolerance_key", [
+        ("lufs", "delta_lufs", "lufs_tolerance_lu"),
+        ("stl_95", "delta_stl_95", "coherence_stl_95_lu"),
+        ("low_rms", "delta_low_rms", "coherence_low_rms_db"),
+        ("vocal_rms", "delta_vocal_rms", "coherence_vocal_rms_db"),
+    ])
+    @pytest.mark.parametrize("sign", [1.0, -1.0])
+    def test_a_delta_exactly_at_tolerance_is_ok(self, metric, key, tolerance_key, sign):
+        tolerance = TOLERANCES[tolerance_key]
+        for delta, severity in ((tolerance, "ok"), (tolerance + 0.01, "outlier")):
+            deltas = [_delta(index=1, **{key: sign * delta}), _delta(index=2, is_anchor=True)]
+            analyses = [_analysis(filename="01.wav"), _analysis(filename="02.wav")]
+            result = classify_outliers(deltas, analyses, TOLERANCES, anchor_index_1based=2)
+            found = [v for v in result[0]["violations"] if v["metric"] == metric]
+            assert [v["severity"] for v in found] == [severity], (metric, sign * delta)
+            assert result[0]["is_outlier"] is (severity == "outlier")
+
+    @pytest.mark.parametrize("lra, severity", [(1.0, "ok"), (0.99, "outlier")])
+    def test_lra_exactly_at_the_floor_is_ok(self, lra, severity):
+        assert TOLERANCES["coherence_lra_floor_lu"] == pytest.approx(1.0)
+        deltas = [_delta(index=1), _delta(index=2, is_anchor=True)]
+        analyses = [
+            _analysis(filename="01.wav", lra=lra),
+            _analysis(filename="02.wav", lra=6.5),
+        ]
+        result = classify_outliers(deltas, analyses, TOLERANCES, anchor_index_1based=2)
+        floor = [v for v in result[0]["violations"] if v["metric"] == "lra_floor"]
+        assert [v["severity"] for v in floor] == [severity]
+        assert result[0]["is_outlier"] is (severity == "outlier")
+
     def test_stl_95_outlier_flagged_and_not_correctable(self):
         deltas = [
             _delta(index=1, delta_stl_95=0.9),
@@ -146,8 +178,8 @@ class TestClassifyOutliers:
             _delta(index=2, is_anchor=True),
         ]
         analyses = [
-            _analysis(filename="01.wav", short_term_range=0.7),   # below floor
-            _analysis(filename="02.wav", short_term_range=6.5),
+            _analysis(filename="01.wav", lra=0.7),   # below floor
+            _analysis(filename="02.wav", lra=6.5),
         ]
         result = classify_outliers(deltas, analyses, TOLERANCES, anchor_index_1based=2)
         floor_violations = [

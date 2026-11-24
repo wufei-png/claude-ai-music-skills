@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 import logging
 import time
@@ -132,6 +133,7 @@ async def qc_audio(
     subfolder: str = "",
     checks: str = "",
     genre: str = "",
+    ceiling_db: float | None = None,
 ) -> str:
     """Run technical QC checks on audio tracks.
 
@@ -146,9 +148,14 @@ async def qc_audio(
         genre: Optional genre preset name. When set, the click detector uses
                 genre-tuned peak/RMS thresholds so intentional sharp transients
                 in electronic/metal/IDM don't FAIL QC.
+        ceiling_db: True-peak ceiling the tracks were mastered to, for the
+                truepeak check. Omit to use the ceiling mastering resolves
+                for this genre and config (mastering.true_peak_ceiling,
+                tightened for opus-safe genres; -1.0 by default).
 
     Returns:
-        JSON with per-track QC results, summary, and verdicts
+        JSON with per-track QC results, summary, verdicts, and the
+        ceiling_db the truepeak check used
     """
     dep_err = _helpers._check_mastering_deps()
     if dep_err:
@@ -192,11 +199,22 @@ async def qc_audio(
         except ValueError as e:
             return _safe_json({"error": str(e)})
 
+    # The true-peak check measures against the ceiling mastering would use,
+    # not a fixed -1.0 (#683): the argument, else genre preset and config.
+    from tools.mastering.config import build_effective_preset
+
+    ceiling_bundle = build_effective_preset(
+        genre=genre_arg or "", ceiling_db_arg=ceiling_db,
+    )
+    if ceiling_bundle["error"] is not None:
+        ceiling_bundle = build_effective_preset(genre="", ceiling_db_arg=ceiling_db)
+    qc_ceiling = float(ceiling_bundle["targets"]["ceiling_db"])
+
     loop = asyncio.get_running_loop()
     results = []
     for wav in wav_files:
         result = await loop.run_in_executor(
-            None, qc_track, str(wav), active_checks, genre_arg
+            None, qc_track, str(wav), active_checks, genre_arg, qc_ceiling,
         )
         results.append(result)
 
@@ -221,6 +239,7 @@ async def qc_audio(
             "failed": failed,
         },
         "verdict": verdict,
+        "ceiling_db": qc_ceiling,
     })
 
 
@@ -239,8 +258,8 @@ def _refresh_playlist(album_slug: str, audio_dir: Path) -> str | None:
 async def master_audio(
     album_slug: str,
     genre: str = "",
-    target_lufs: float = -14.0,
-    ceiling_db: float = -1.0,
+    target_lufs: float | None = None,
+    ceiling_db: float | None = None,
     cut_highmid: float | None = None,
     cut_highs: float | None = None,
     dry_run: bool = False,
@@ -255,8 +274,12 @@ async def master_audio(
     Args:
         album_slug: Album slug (e.g., "my-album")
         genre: Genre preset to apply (overrides EQ/LUFS defaults if set)
-        target_lufs: Target integrated loudness (default: -14.0)
-        ceiling_db: True peak ceiling in dB (default: -1.0)
+        target_lufs: Target integrated loudness. Omit to use the genre
+            preset's target (else mastering.target_lufs in config, else
+            -14.0); any value passed, -14.0 included, is used as given.
+        ceiling_db: True peak ceiling in dB. Omit to use the genre preset
+            and config (else -1.0); any value passed, -1.0 included, is
+            used as given.
         cut_highmid: High-mid EQ cut in dB at 3.5kHz (e.g., -2.0). Omit
             (None) to use the genre preset's cut; pass 0 or 0.0 explicitly
             to disable the cut regardless of genre.
@@ -414,18 +437,58 @@ async def master_audio(
     })
 
 
-async def fix_dynamic_track(album_slug: str, track_filename: str) -> str:
+def _delivery_bundle_for_album(
+    album_slug: str,
+    genre: str,
+    source_sample_rate: int | None,
+) -> dict[str, Any]:
+    """Delivery targets for a single-track tool writing into ``mastered/``.
+
+    The same resolution ``master_album`` uses (``build_effective_preset``):
+    genre preset > ``mastering:`` config > defaults for the loudness target,
+    true-peak ceiling, bit depth and sample rate (#681). An explicit ``genre``
+    must be a known mastering genre; without one the album's own genre is
+    used when it is one, and otherwise the config alone decides.
+    """
+    from tools.mastering.config import build_effective_preset
+
+    explicit = bool(genre)
+    chosen = genre or _helpers._derive_album_genre(album_slug)
+    bundle = build_effective_preset(
+        genre=chosen,
+        source_sample_rate=source_sample_rate,
+    )
+    if bundle["error"] is not None and chosen and not explicit:
+        # The album's genre has no mastering preset: deliver to config.
+        bundle = build_effective_preset(
+            genre="",
+            source_sample_rate=source_sample_rate,
+        )
+    return bundle
+
+
+async def fix_dynamic_track(
+    album_slug: str,
+    track_filename: str,
+    genre: str = "",
+) -> str:
     """Fix a track with excessive dynamic range that won't reach target LUFS.
 
     Applies gentle compression followed by standard mastering to bring
-    the track into line with the rest of the album.
+    the track into line with the rest of the album. The fixed track is
+    written to ``mastered/`` in the album's delivery format: the genre's
+    (or config's) loudness target and true-peak ceiling, at
+    ``mastering.delivery_bit_depth`` / ``delivery_sample_rate``, as
+    ``master_album`` writes the rest of the album.
 
     Args:
         album_slug: Album slug (e.g., "my-album")
         track_filename: WAV filename (e.g., "01-track-name.wav")
+        genre: Optional mastering genre preset for the loudness target and
+            ceiling. Defaults to the album's genre when it has a preset.
 
     Returns:
-        JSON with before/after metrics
+        JSON with before/after metrics and the delivery settings used
     """
     dep_err = _helpers._check_mastering_deps()
     if dep_err:
@@ -451,36 +514,49 @@ async def fix_dynamic_track(album_slug: str, track_filename: str) -> str:
             "available_files": [f.name for f in _find_wav_source_dir(audio_dir).glob("*.wav")],
         })
 
+    import soundfile as sf
+
+    bundle = _delivery_bundle_for_album(
+        album_slug, genre, int(sf.info(str(input_path)).samplerate),
+    )
+    if bundle["error"] is not None:
+        return _safe_json({
+            "error": bundle["error"]["reason"],
+            "available_genres": bundle["error"]["available_genres"],
+        })
+    targets = bundle["targets"]
+
     output_dir = audio_dir / "mastered"
     output_dir.mkdir(exist_ok=True)
     output_path = output_dir / Path(track_filename).name
 
-    from tools.mastering.fix_dynamic_track import fix_dynamic
-    from tools.mastering.master_tracks import apply_fade_out
+    from tools.mastering.fix_dynamic_track import fix_dynamic_to_file
 
     # The fix re-processes the source, so it needs the track's fade too.
     fade = _helpers._track_fade_out(album_slug, track_filename)
 
     def _do_fix(in_path: Path, out_path: Path) -> dict[str, Any]:
-        import numpy as np
-        import soundfile as sf
-
-        data, rate = sf.read(str(in_path))
-        if len(data.shape) == 1:
-            data = np.column_stack([data, data])
-        if fade:  # before the loudness work, as in master_track
-            data = apply_fade_out(data, rate, duration=fade)
-
-        data, metrics = fix_dynamic(data, rate)
-
-        sf.write(str(out_path), data, rate, subtype="PCM_16")
-
+        metrics = fix_dynamic_to_file(
+            in_path, out_path,
+            target_lufs=targets["target_lufs"],
+            ceiling_db=targets["ceiling_db"],
+            output_bits=targets["output_bits"],
+            output_sample_rate=targets["output_sample_rate"],
+            fade_out=fade,
+        )
         return {
             "filename": in_path.name,
             "original_lufs": metrics["original_lufs"],
             "final_lufs": metrics["final_lufs"],
-            "final_peak_db": metrics["final_peak_db"],
+            "final_peak_db": metrics["true_peak_db"],
             "output_path": str(out_path),
+            "settings": {
+                "genre": bundle["genre_applied"],
+                "target_lufs": targets["target_lufs"],
+                "ceiling_db": targets["ceiling_db"],
+                "output_bits": metrics["output_bits"],
+                "output_sample_rate": metrics["sample_rate"],
+            },
         }
 
     loop = asyncio.get_running_loop()
@@ -498,7 +574,9 @@ async def master_with_reference(
 
     Uses the matchering library to match your track(s) to a reference.
     If target_filename is empty, processes all WAV files in the album's
-    audio directory.
+    audio directory. Output goes to ``mastered/`` in the album's delivery
+    format (``mastering.delivery_bit_depth`` / ``delivery_sample_rate``)
+    with peaks held to the true-peak ceiling, like ``master_album``.
 
     Args:
         album_slug: Album slug (e.g., "my-album")
@@ -532,6 +610,18 @@ async def master_with_reference(
             "suggestion": "Place the reference WAV in the album's audio directory.",
         })
 
+    # The album's delivery format and ceiling (#681): matchering alone wrote
+    # 16-bit / 44.1 kHz peaking at about -0.02 dBFS into mastered/.
+    bundle = _delivery_bundle_for_album(album_slug, "", None)
+    if bundle["error"] is not None:  # pragma: no cover - genre "" cannot fail
+        return _safe_json({"error": bundle["error"]["reason"]})
+    targets = bundle["targets"]
+    delivery = {
+        "output_bits": targets["output_bits"],
+        "output_sample_rate": targets["output_sample_rate"],
+        "ceiling_db": targets["ceiling_db"],
+    }
+
     output_dir = audio_dir / "mastered"
     output_dir.mkdir(exist_ok=True)
 
@@ -545,6 +635,7 @@ async def master_with_reference(
         })
 
     loop = asyncio.get_running_loop()
+    ref_master = functools.partial(_ref_master, **delivery)
 
     if target_filename:
         if not _is_path_confined(audio_dir, target_filename):
@@ -565,11 +656,12 @@ async def master_with_reference(
 
         try:
             await loop.run_in_executor(
-                None, _ref_master, target_path, reference_path, output_path
+                None, ref_master, target_path, reference_path, output_path
             )
             return _safe_json({
                 "tracks": [{"filename": target_filename, "success": True, "output": str(output_path)}],
                 "summary": {"success": 1, "failed": 0},
+                "settings": delivery,
                 "playlist": _refresh_playlist(album_slug, audio_dir),
             })
         except Exception as e:
@@ -593,7 +685,7 @@ async def master_with_reference(
             output_path = output_dir / wav_file.name
             try:
                 await loop.run_in_executor(
-                    None, _ref_master, wav_file, reference_path, output_path
+                    None, ref_master, wav_file, reference_path, output_path
                 )
                 results.append({"filename": wav_file.name, "success": True, "output": str(output_path)})
             except Exception as e:
@@ -603,6 +695,7 @@ async def master_with_reference(
         return _safe_json({
             "tracks": results,
             "summary": {"success": success_count, "failed": len(results) - success_count},
+            "settings": delivery,
             "playlist": _refresh_playlist(album_slug, audio_dir),
         })
 
@@ -669,8 +762,8 @@ def _adm_adaptive_ceiling_per_track(
 async def master_album(
     album_slug: str,
     genre: str = "",
-    target_lufs: float = -14.0,
-    ceiling_db: float = -1.0,
+    target_lufs: float | None = None,
+    ceiling_db: float | None = None,
     cut_highmid: float | None = None,
     cut_highs: float | None = None,
     source_subfolder: str = "",
@@ -678,6 +771,10 @@ async def master_album(
     new_anchor: bool = False,
 ) -> str:
     """End-to-end mastering pipeline: analyze, QC, master, verify, update status.
+
+    The status stage marks a track Final only when this run mastered it and
+    its Generation Log has a ✓ keeper; others are listed in
+    ``stages.status_update.tracks_left`` with the reason (#679 item 2).
 
     Runs in three phases, stopping on failure. See _album_stages.py for
     per-stage implementation. Stage order mirrors the #290 pipeline spec.
@@ -731,8 +828,12 @@ async def master_album(
     Args:
         album_slug: Album slug (e.g., "my-album").
         genre: Genre preset to apply (EQ/LUFS/QC tolerances).
-        target_lufs: Target integrated loudness (default: -14.0).
-        ceiling_db: True peak ceiling in dB (default: -1.0).
+        target_lufs: Target integrated loudness. Omit to use the genre
+            preset's target (else mastering.target_lufs in config, else
+            -14.0); any value passed, -14.0 included, is used as given.
+        ceiling_db: True peak ceiling in dB. Omit to use the genre preset
+            and config (else -1.0); any value passed, -1.0 included, is
+            used as given.
         cut_highmid: High-mid EQ cut in dB at 3.5kHz (e.g., -2.0). Omit
             (None) to use the genre preset's cut; pass 0 or 0.0
             explicitly to disable the cut regardless of genre.
@@ -1534,11 +1635,13 @@ async def measure_album_signature(
         genre: Optional genre preset slug (e.g., "pop"). When set, the
             anchor selector runs with the resolved preset's
             ``genre_ideal_lra_lu`` and ``spectral_reference_energy``.
-        anchor_track: Optional explicit 1-based track number to use as
-            the anchor. Overrides both ``genre``-based selection and any
-            album-README ``anchor_track:`` frontmatter value. Out-of-range
-            values fall through to composite scoring (and are surfaced
-            via ``anchor.override_reason``).
+        anchor_track: Optional explicit track number to use as the
+            anchor: the WAV whose leading digits carry it (``03-x.wav``
+            is track 3), wherever it sorts. Overrides both
+            ``genre``-based selection and any album-README
+            ``anchor_track:`` frontmatter value. A number no WAV carries,
+            or one two WAVs share, falls through to composite scoring,
+            surfaced via ``anchor.override_reason`` and ``warnings``.
 
     Returns:
         JSON string. On success includes ``tracks``, ``album``, and —
@@ -1588,14 +1691,13 @@ async def measure_album_signature(
     # skip the preset step entirely so unknown-genre doesn't error a
     # signature-only measurement run).
     preset_dict: dict[str, Any] | None = None
+    anchor_ceiling: float | None = None
     if genre:
         from tools.mastering.config import build_effective_preset
         bundle = build_effective_preset(
             genre=genre,
             # Only preset_dict is consumed here; the cut arguments are
             # left at their "use the preset" default (#556).
-            target_lufs_arg=-14.0,
-            ceiling_db_arg=-1.0,
         )
         if bundle["error"] is not None:
             return _safe_json({
@@ -1603,6 +1705,8 @@ async def measure_album_signature(
                 "available_genres": bundle["error"].get("available_genres", []),
             })
         preset_dict = bundle["preset_dict"]
+        # The anchor's limiter penalty is taken at the genre's ceiling (#681).
+        anchor_ceiling = bundle["targets"]["ceiling_db"]
 
     # Determine whether an anchor is requested and which override to use.
     # Precedence: explicit arg > README frontmatter > composite scoring > none.
@@ -1650,6 +1754,7 @@ async def measure_album_signature(
             analysis_results,
             anchor_preset,
             override_index=override_index,
+            ceiling_db=anchor_ceiling,
         )
         anchor_block: dict[str, Any] = {
             "selected_index":  anchor_result["selected_index"],
@@ -1666,8 +1771,18 @@ async def measure_album_signature(
         else:
             anchor_block["deltas"] = []
         response["anchor"] = anchor_block
+        if override_index is not None and anchor_result["method"] != "override":
+            response["warnings"] = [_anchor_override_warning(override_index, anchor_result)]
 
     return _safe_json(response)
+
+
+def _anchor_override_warning(number: int, anchor_result: dict[str, Any]) -> str:
+    """Why a requested anchor track number was not used (#668)."""
+    return (
+        f"anchor_track {number} not used ({anchor_result['override_reason']}); "
+        f"the anchor was chosen by {anchor_result['method']} instead."
+    )
 
 
 async def album_coherence_check(
@@ -1682,7 +1797,7 @@ async def album_coherence_check(
     classifies each non-anchor track against per-genre tolerance bands:
       • LUFS delta (±0.5 LU, correctable in MVP)
       • STL-95 delta (±coherence_stl_95_lu, reported)
-      • LRA floor (short_term_range ≥ coherence_lra_floor_lu, reported)
+      • LRA floor (EBU R128 LRA ≥ coherence_lra_floor_lu, reported)
       • low-RMS delta (±coherence_low_rms_db, reported)
       • vocal-RMS delta (±coherence_vocal_rms_db, reported)
 
@@ -1695,9 +1810,11 @@ async def album_coherence_check(
         genre: Genre preset slug. Required unless anchor_track is given
             (in which case hardcoded default tolerances are used and a
             warning is emitted).
-        anchor_track: Optional 1-based track number override for the
-            anchor. Overrides genre-driven composite scoring + state-
-            cache frontmatter.
+        anchor_track: Optional track number override for the anchor,
+            matched to the WAV whose leading digits carry it. Overrides
+            genre-driven composite scoring + state-cache frontmatter. A
+            number no WAV carries falls through to composite scoring
+            with a warning.
 
     Returns:
         JSON string with settings, album aggregates, anchor block,
@@ -1750,6 +1867,7 @@ async def album_coherence_check(
     )
 
     preset_dict: dict[str, Any] | None = None
+    anchor_ceiling: float | None = None
     warnings: list[str] = []
     if genre:
         from tools.mastering.config import build_effective_preset
@@ -1757,8 +1875,6 @@ async def album_coherence_check(
             genre=genre,
             # Only preset_dict is consumed here; the cut arguments are
             # left at their "use the preset" default (#556).
-            target_lufs_arg=-14.0,
-            ceiling_db_arg=-1.0,
         )
         if bundle["error"] is not None:
             return _safe_json({
@@ -1766,6 +1882,8 @@ async def album_coherence_check(
                 "available_genres": bundle["error"].get("available_genres", []),
             })
         preset_dict = bundle["preset_dict"]
+        # The anchor's limiter penalty is taken at the genre's ceiling (#681).
+        anchor_ceiling = bundle["targets"]["ceiling_db"]
     else:
         warnings.append(
             "No genre supplied — using default coherence tolerances. "
@@ -1804,6 +1922,7 @@ async def album_coherence_check(
         analysis_results,
         preset_dict or {},
         override_index=override_index,
+        ceiling_db=anchor_ceiling,
     )
 
     anchor_block: dict[str, Any] = {
@@ -1813,6 +1932,8 @@ async def album_coherence_check(
         "override_reason": anchor_result["override_reason"],
         "scores":          anchor_result["scores"],
     }
+    if override_index is not None and anchor_result["method"] != "override":
+        warnings.append(_anchor_override_warning(override_index, anchor_result))
 
     classifications: list[dict[str, Any]] = []
     summary: dict[str, Any] = {
@@ -1885,8 +2006,8 @@ async def album_coherence_correct(
     genre: str,
     source_subfolder: str = "polished",
     check_subfolder: str = "mastered",
-    target_lufs: float = -14.0,
-    ceiling_db: float = -1.0,
+    target_lufs: float | None = None,
+    ceiling_db: float | None = None,
     cut_highmid: float | None = None,
     cut_highs: float | None = None,
     anchor_track: int | None = None,
@@ -1913,7 +2034,8 @@ async def album_coherence_correct(
         check_subfolder: Directory to measure first (default "mastered").
         target_lufs / ceiling_db: Mastering overrides used only as the
             initial preset; per-track target_lufs is overridden with the
-            anchor's measured LUFS during correction.
+            anchor's measured LUFS during correction. Omit to use the genre
+            preset and config; any value passed is used as given.
         cut_highmid / cut_highs: EQ cuts in dB (3.5kHz / 8kHz). Omit
             (None) to use the genre preset's cut; pass 0 or 0.0
             explicitly to disable that cut regardless of genre. The
@@ -2140,7 +2262,7 @@ async def album_coherence_correct(
                 "result_lufs":          staged_result["lufs"],
                 "status":               "ok",
                 "delta_from_anchor":    delta,
-                "within_tolerance":     abs(delta) <= 0.5,
+                "within_tolerance":     bool(abs(delta) <= 0.5),
             })
 
         if failed == 0 and response["corrections"]:

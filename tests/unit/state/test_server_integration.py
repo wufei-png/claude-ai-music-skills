@@ -103,6 +103,17 @@ def _ensure_shared_cache():
     # Restore is implicit — the next _import_server() sets it again
 
 
+def _mark_keeper(env, slug):
+    """The user marks a take ✓ in the track's Generation Log — what listen and
+    generate do before setting Final, which needs a ✓ keeper (#679 item 3)."""
+    track = env["album_dir"] / "tracks" / f"{slug}.md"
+    track.write_text(track.read_text() + (
+        "\n## Generation Log\n\n| # | Date | Model | Result | Notes | Rating |\n"
+        "|---|------|-------|--------|-------|--------|\n"
+        "| 1 | 2026-02-09 | v6 | [Listen](https://suno.com/test) | keeper | ✓ |\n"
+    ))
+
+
 def _run(coro):
     """Run an async coroutine synchronously."""
     return asyncio.run(coro)
@@ -1533,12 +1544,8 @@ class TestCheckHomographsExtended:
         words = [f["canonical"] for f in result["matches"]]
         assert "read" in words
 
-    def test_empty_text(self, integration_env):
-        """check_homographs returns empty for blank text."""
-        result = json.loads(_run(server.check_homographs("")))
-        assert result["count"] == 0
-        assert result["has_homographs"] is False
-        assert result["matches"] == []
+    # Blank text: test_server.py's TestCheckHomographs.test_empty_text
+    # (this class had an identical copy).
 
     def test_multiple_homographs(self, integration_env):
         """check_homographs detects multiple different homographs."""
@@ -2462,10 +2469,11 @@ class TestWorkflowAlbumLifecycle:
             force=True,
         )))
         assert update["success"] is True
-        # Set Suno link before Final transition
+        # Set Suno link and mark the keeper ✓ before Final transition
         _run(server.update_track_field(
             "integration-test-album", "02-second-track", "suno-link", "https://suno.com/test02"
         ))
+        _mark_keeper(integration_env, "02-second-track")
         update = json.loads(_run(server.update_track_field(
             "integration-test-album", "02-second-track", "status", "Final"
         )))
@@ -2501,10 +2509,11 @@ class TestWorkflowAlbumLifecycle:
                 force=True,
             )))
             assert result["success"] is True
-            # Set Suno link before Final transition
+            # Set Suno link and mark the keeper ✓ before Final transition
             _run(server.update_track_field(
                 "integration-test-album", slug, "suno-link", "https://suno.com/test"
             ))
+            _mark_keeper(integration_env, slug)
             result = json.loads(_run(server.update_track_field(
                 "integration-test-album", slug, "status", "Final"
             )))
@@ -2877,15 +2886,22 @@ class TestUpdateAlbumStatusIntegration:
 
     def test_updates_readme_and_cache(self, integration_env):
         """Status change persists in README.md and updates state cache."""
-        # Advance tracks to meet consistency requirements for "Complete"
+        # Complete needs every track Final (#679 item 4), and the last track
+        # going Final advances the album itself; to test this tool's own
+        # README/cache write, the tracks stay Generated and force=True passes
+        # the track check.
         for slug in ["02-second-track", "03-third-track"]:
             _run(server.update_track_field(
                 "integration-test-album", slug, "status", "Generated",
                 force=True,
             ))
 
-        result = json.loads(_run(server.update_album_status(
+        refused = json.loads(_run(server.update_album_status(
             "integration-test-album", "Complete"
+        )))
+        assert "not Final" in refused["error"]
+        result = json.loads(_run(server.update_album_status(
+            "integration-test-album", "Complete", force=True
         )))
         assert result["success"] is True
         assert result["old_status"] == "In Progress"
@@ -2908,10 +2924,11 @@ class TestUpdateAlbumStatusIntegration:
                 "integration-test-album", slug, "status", "Generated",
                 force=True,
             ))
-            # Set Suno link before Final transition
+            # Set Suno link and mark the keeper ✓ before Final transition
             _run(server.update_track_field(
                 "integration-test-album", slug, "suno-link", "https://suno.com/test"
             ))
+            _mark_keeper(integration_env, slug)
             _run(server.update_track_field(
                 "integration-test-album", slug, "status", "Final"
             ))
@@ -3158,6 +3175,18 @@ class TestNewToolWorkflows:
         # Create track
         _run(server.create_track("integration-test-album", "04", "Workflow Track"))
         _run(server.rebuild_state())
+
+        # The album keeps SOURCES.md, so the new track's sources are "❌ Pending"
+        # and it cannot skip verification (#679 item 6) …
+        result = json.loads(_run(server.update_track_field(
+            "integration-test-album", "04-workflow-track", "status", "In Progress"
+        )))
+        assert "sources are not verified" in result["error"]
+        # … until it says it has none.
+        result = json.loads(_run(server.update_track_field(
+            "integration-test-album", "04-workflow-track", "sources-verified", "N/A"
+        )))
+        assert result["success"] is True
 
         # Update the new track's status: Not Started → In Progress → Generated
         # (force Generated to bypass pre-gen gates on template content)

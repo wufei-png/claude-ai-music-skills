@@ -38,6 +38,11 @@ DEFAULT_MASTERING_CONFIG: dict[str, Any] = {
     "adm_validation_enabled": False,
 }
 
+# Ceiling an ``opus_safe`` genre preset tightens the config ceiling to, when
+# the config's own ceiling is looser (dense-transient genres need the extra
+# headroom against Opus/AAC inter-sample overs).
+OPUS_SAFE_CEILING_DB = -1.5
+
 # Per-key type coercion. Values from YAML may come through as strings when
 # a user quotes them; we coerce to the canonical type here rather than
 # sprinkle isinstance checks across the pipeline.
@@ -137,25 +142,54 @@ def _resolve_adm_enabled(album_mastering: dict[str, Any] | None) -> bool:
         return False
 
 
+def adm_global_setting_note(
+    config: dict[str, Any], album_mastering: dict[str, Any] | None,
+) -> str | None:
+    """A warning when config.yaml asks for ADM validation that won't run.
+
+    ADM validation is enabled per album only (``_resolve_adm_enabled``).
+    ``mastering.adm_validation_enabled: true`` in config.yaml used to be
+    ignored without a word, so a user who set it there got no validation and
+    no sign of it (#683). Returns None when the global value is unset or
+    false, or when the album's frontmatter decides for itself.
+    """
+    if not _config_bool(config, "adm_validation_enabled", False):
+        return None
+    if album_mastering and "adm_validation_enabled" in album_mastering:
+        return None
+    return (
+        "mastering.adm_validation_enabled is true in config.yaml, but ADM "
+        "validation is switched on per album only, so it did not run. To run "
+        "it for this album, add `mastering: {adm_validation_enabled: true}` "
+        "to the album README's frontmatter."
+    )
+
+
 def build_delivery_targets(
     config: dict[str, Any],
     *,
     preset: dict[str, Any] | None,
-    target_lufs_arg: float,
-    ceiling_db_arg: float,
+    target_lufs_arg: float | None = None,
+    ceiling_db_arg: float | None = None,
     source_sample_rate: int | None = None,
     album_mastering: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Resolve effective mastering targets from config + preset + explicit args.
 
     Precedence (highest wins):
-      1. Explicit arg (when it differs from the function's documented default).
+      1. Explicit arg (any value that is not None).
       2. Genre preset (when provided and relevant field set).
       3. Config value.
 
-    ``target_lufs_arg`` defaults to -14.0 and ``ceiling_db_arg`` to -1.0 in
-    handler signatures; a value equal to the default is treated as "not
-    explicitly set" so the preset can take precedence.
+    For the delivery format (``output_bits`` / ``output_sample_rate``) the
+    shipped presets set 0 = "not set", so step 2 only applies to a value a
+    user put in ``{overrides}/mastering-presets.yaml``. ``opus_safe`` never
+    loosens the ceiling: it yields ``min(config ceiling, -1.5)`` (#681).
+
+    ``target_lufs_arg`` / ``ceiling_db_arg`` use None for "not passed", so
+    the preset and config decide. Any number is the caller's choice and wins,
+    -14.0 and -1.0 included: those used to double as the "not set" sentinel,
+    so an explicit -14 LUFS on a classical album gave the preset's -18 (#683).
 
     ``album_mastering`` is the per-album ``mastering:`` frontmatter block
     (from the album's README). For ``adm_validation_enabled`` specifically,
@@ -163,7 +197,7 @@ def build_delivery_targets(
     is ignored for this key (see ``_resolve_adm_enabled``).
     """
     # Loudness target
-    if target_lufs_arg != -14.0:
+    if target_lufs_arg is not None:
         target_lufs = float(target_lufs_arg)
     elif preset is not None and preset.get("target_lufs") is not None:
         target_lufs = float(preset["target_lufs"])
@@ -171,28 +205,32 @@ def build_delivery_targets(
         target_lufs = float(config.get("target_lufs", -14.0))
 
     # True peak ceiling — precedence: explicit arg > preset true_peak_ceiling
-    # > opus_safe flag (-1.5 headroom for dense-transient genres) > config default
-    if ceiling_db_arg != -1.0:
+    # > config, with the opus_safe flag (dense-transient genres) able only to
+    # TIGHTEN the config ceiling to -1.5 dBTP. A user who set a tighter
+    # ceiling (say -2.0) keeps it on an opus-safe genre (#681).
+    if ceiling_db_arg is not None:
         ceiling_db = float(ceiling_db_arg)
     elif preset is not None and preset.get("true_peak_ceiling") is not None:
         ceiling_db = float(preset["true_peak_ceiling"])
-    elif preset is not None and preset.get("opus_safe"):
-        ceiling_db = -1.5
     else:
         ceiling_db = float(config.get("true_peak_ceiling", -1.0))
+        if preset is not None and preset.get("opus_safe"):
+            ceiling_db = min(ceiling_db, OPUS_SAFE_CEILING_DB)
 
-    # Output bit depth — preset wins whenever it sets a value (0 = "not set").
-    # User-supplied overrides in {overrides}/mastering-presets.yaml can force
-    # legacy 16-bit output per-genre even when mastering.delivery_bit_depth
-    # is 24 globally.
-    preset_bits = int(preset.get("output_bits", 0)) if preset else 0
+    # Delivery format — precedence (#681): an explicit per-genre value in the
+    # user's {overrides}/mastering-presets.yaml > mastering.delivery_bit_depth
+    # / delivery_sample_rate in config.yaml > the defaults (24 / 96000).
+    # The shipped presets leave output_bits / output_sample_rate at 0 ("not
+    # set"), so they never clobber the config; only a user override that sets
+    # a non-zero value can force one genre to a different format.
+    preset_bits = int(preset.get("output_bits") or 0) if preset else 0
     if preset_bits > 0:
         output_bits = preset_bits
     else:
         output_bits = int(config.get("delivery_bit_depth", 24))
 
-    # Output sample rate — preset wins only when non-zero (0 = "preserve input")
-    preset_sr = int(preset.get("output_sample_rate", 0)) if preset else 0
+    # Output sample rate — same rule: a non-zero preset value is an override
+    preset_sr = int(preset.get("output_sample_rate") or 0) if preset else 0
     if preset_sr > 0:
         output_sample_rate = preset_sr
     else:
@@ -238,8 +276,8 @@ def build_effective_preset(
     genre: str,
     cut_highmid_arg: float | None = None,
     cut_highs_arg: float | None = None,
-    target_lufs_arg: float,
-    ceiling_db_arg: float,
+    target_lufs_arg: float | None = None,
+    ceiling_db_arg: float | None = None,
     source_sample_rate: int | None = None,
     album_mastering: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -330,11 +368,17 @@ def build_effective_preset(
         **(preset_dict or {}),
         "target_lufs": effective_lufs,
         "output_bits": targets["output_bits"],
-        # dither_bits follows output_bits unless a genre preset overrides it.
+        # dither_bits follows output_bits unless a genre preset overrides it
+        # with a non-zero value (0 = "follow output_bits", as shipped).
         # Without this, a genreless master (preset_dict is None) inherits the
         # _PRESET_DEFAULTS dither_bits=16 in master_track while output_bits
-        # resolves to 24, dithering a 24-bit file to a 16-bit noise floor. (#373)
-        "dither_bits": (preset_dict or {}).get("dither_bits", targets["output_bits"]),
+        # resolves to 24, dithering a 24-bit file to a 16-bit noise floor
+        # (#373) — and a 16-bit config with a preset's dither_bits of 24 would
+        # truncate instead of dithering (#681).
+        "dither_bits": (
+            int((preset_dict or {}).get("dither_bits") or 0)
+            or targets["output_bits"]
+        ),
         "output_sample_rate": targets["output_sample_rate"],
         "cut_highmid": effective_highmid,
         "cut_highs": effective_highs,
