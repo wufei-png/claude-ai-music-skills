@@ -1,0 +1,39 @@
+name: Windows first setup for PR 645
+
+on:
+  push:
+    branches:
+      - codex/windows-first-setup-b766c18
+
+permissions:
+  contents: read
+
+jobs:
+  first-setup:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out the verification harness
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: harness
+          persist-credentials: false
+      - name: Check out the exact PR head
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: b766c18363bfc6c6157a8b9c896172fcb745273a
+          path: product
+          persist-credentials: false
+      - name: Set up Python for the test harness
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.11'
+      - name: Install the PR-pinned Codex CLI
+        run: npm ci --prefix product/tests/e2e/codex --no-audit --no-fund
+      - name: Run the documented PowerShell setup and open a new MCP session
+        run: |
+          Write-Host "PowerShell $($PSVersionTable.PSVersion)"
+          python -u harness/.github/scripts/windows-first-setup-validation.py product
