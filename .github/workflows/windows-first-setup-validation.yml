@@ -1,4 +1,4 @@
-name: Windows first setup for PR 645
+name: Windows first setup on Python 3.11 for PR 645
 
 on:
   push:
@@ -34,6 +34,9 @@ jobs:
       - name: Install the PR-pinned Codex CLI
         run: npm ci --prefix product/tests/e2e/codex --no-audit --no-fund
       - name: Run the documented PowerShell setup and open a new MCP session
+        env:
+          # Exercise the same documented commands with Python 3.11 selected.
+          PY_PYTHON3: '3.11'
         run: |
           Write-Host "PowerShell $($PSVersionTable.PSVersion)"
           python -u harness/.github/scripts/windows-first-setup-validation.py product
